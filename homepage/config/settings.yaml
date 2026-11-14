@@ -1,0 +1,12 @@
+title: malex.tech Control Center
+theme: dark
+color: zinc
+headerStyle: clean
+statusStyle: dot
+layout:
+  Public & Media:
+    style: row
+    columns: 2
+  Monitoring & Telemetry:
+    style: row
+    columns: 2

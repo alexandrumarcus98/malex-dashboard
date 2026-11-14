@@ -1,0 +1,16 @@
+# Secrets & credentials
+.env
+*.pem
+*.key
+*_id_ed25519*
+.azure/
+
+# Runtime volumes & generated files
+data/
+cloud-init.rendered.yaml
+
+# OS / editor artifacts
+.DS_Store
+.idea/
+.serena/
+homepage/config/logs/

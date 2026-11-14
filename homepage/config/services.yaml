@@ -1,0 +1,25 @@
+- Public & Media:
+    - malex.tech:
+        href: https://malex.tech
+        description: Personal site (Cloudflare Workers)
+        siteMonitor: https://malex.tech
+
+    - Muuvies (media.malex.tech):
+        href: https://media.malex.tech
+        description: Hetzner VPS media control plane
+        siteMonitor: https://media.malex.tech/api/health
+
+- Monitoring & Telemetry:
+    - Beszel (Metrics Hub):
+        href: https://metrics.malex.tech
+        description: Multi-node CPU, RAM, disk & container telemetry
+        siteMonitor: http://beszel:8090
+
+    - Uptime Kuma:
+        href: https://status.malex.tech
+        description: Endpoint uptime checks & Discord alerts
+        siteMonitor: http://uptime-kuma:3001
+
+    - Healthchecks.io:
+        href: https://healthchecks.io
+        description: Watchdog & daily Restic backup heartbeats
