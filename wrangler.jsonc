@@ -1,0 +1,37 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "malex-dashboard",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-14",
+  "workers_dev": false,
+  "routes": [
+    {
+      "pattern": "dashboard.malex.tech",
+      "custom_domain": true
+    }
+  ],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "malex-dashboard-db",
+      "database_id": "72dcf516-61f3-4d03-9d39-e236bb3a2b10",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+  "vars": {
+    "CF_ZONE_ID": "6ce95b157e8beb1b707ef41d4692a4e5",
+    "CF_ACCESS_TEAM_DOMAIN": "divine-base-c80e.cloudflareaccess.com",
+    "CF_ACCESS_AUD": "cb02ae4dedaf11bcbab336b1d82161c19028c0595fcb90c444e73d55e31cadce",
+    "CF_INGEST_ACCESS_AUD": "875c99e5f75646da4c03aadffd599120b6a15edcd5b049c746543a4d26d82902"
+  }
+}
+
