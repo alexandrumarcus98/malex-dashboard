@@ -25,8 +25,18 @@ fi
 echo "Waiting for cloud-init on ${ADMIN_USER}@${VM_IP}..."
 ssh -o StrictHostKeyChecking=accept-new "${ADMIN_USER}@${VM_IP}" "cloud-init status --wait"
 
-echo "Uploading Compose stack, Homepage config, and .env..."
-scp "${ROOT_DIR}/docker-compose.yml" "${ROOT_DIR}/.env" "${ADMIN_USER}@${VM_IP}:/opt/dashboard/"
+echo "Uploading Compose stack, Homepage config, and runtime .env..."
+TMP_ENV="$(mktemp)"
+trap 'rm -f "${TMP_ENV}"' EXIT
+{
+  printf 'TUNNEL_TOKEN=%s\n' "${TUNNEL_TOKEN}"
+  printf 'HOMEPAGE_ALLOWED_HOSTS=%s\n' "${HOMEPAGE_ALLOWED_HOSTS:-dashboard.malex.tech}"
+  printf 'BESZEL_APP_URL=%s\n' "${BESZEL_APP_URL:-https://metrics.malex.tech}"
+} > "${TMP_ENV}"
+chmod 600 "${TMP_ENV}"
+
+scp "${ROOT_DIR}/docker-compose.yml" "${ADMIN_USER}@${VM_IP}:/opt/dashboard/docker-compose.yml"
+scp "${TMP_ENV}" "${ADMIN_USER}@${VM_IP}:/opt/dashboard/.env"
 scp -r "${ROOT_DIR}/homepage/config/." "${ADMIN_USER}@${VM_IP}:/opt/dashboard/homepage/config/"
 
 echo "Starting dashboard containers..."
@@ -37,3 +47,4 @@ echo "Stack is running. Configure your Cloudflare Zero Trust Tunnel Public Hostn
 echo "  dashboard.malex.tech -> http://homepage:3000"
 echo "  metrics.malex.tech   -> http://beszel:8090"
 echo "  status.malex.tech    -> http://uptime-kuma:3001"
+

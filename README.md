@@ -18,17 +18,14 @@ Private off-VPS monitoring & status center for `malex.tech`, `media.malex.tech`,
 
 ## Quickstart
 
-1. Activate **Azure for Students** and install **Azure CLI (`az`)** (`uv tool install azure-cli` or run from Azure Cloud Shell / Home PC).
-2. Create a Cloudflare Zero Trust Tunnel named `malex-dashboard` and protect `dashboard.malex.tech`, `metrics.malex.tech`, and `status.malex.tech` with **Cloudflare Access** (email / GitHub login).
-3. Copy `.env.example` to `.env` (`chmod 600`) and paste `TUNNEL_TOKEN=...`.
-4. Provision the VM and deploy the stack:
+1. Activate **Azure for Students** and create a scoped **Cloudflare API Token** (`Cloudflare Tunnel: Edit`, `Access: Apps and Policies: Edit`, `Zone DNS: Edit` for `malex.tech`). If you have never opened **Zero Trust** in Cloudflare before, click it once in the sidebar to initialize your free `$0` team name.
+2. Copy `.env.example` to `.env` (`chmod 600`) and set `CF_API_TOKEN` and `CF_ACCESS_EMAIL`.
+3. Run Cloudflare setup + Azure provisioning + deploy via CLI:
    ```bash
-   az login
+   ./scripts/setup-cloudflare.py
+   az login --use-device-code
    ./scripts/provision-azure.sh
    ./scripts/deploy-stack.sh <PUBLIC_IP>
    ```
-5. In Cloudflare Zero Trust Tunnel -> **Public Hostnames**, add:
-   * `dashboard.malex.tech` -> `HTTP` -> `homepage:3000`
-   * `metrics.malex.tech` -> `HTTP` -> `beszel:8090`
-   * `status.malex.tech` -> `HTTP` -> `uptime-kuma:3001`
-6. Open `https://metrics.malex.tech` to initialize Beszel and copy the agent command onto your Hetzner VPS and local machines.
+4. Open `https://metrics.malex.tech` to initialize Beszel and copy the agent command onto your Hetzner VPS and local machines.
+
