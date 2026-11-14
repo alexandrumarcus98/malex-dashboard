@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>malex.tech Operations Dashboard</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <span id="overall-dot" class="dot dot-muted"></span>
+        <div>
+          <h1>malex.tech</h1>
+          <p class="subtitle">Serverless Ops &amp; Infrastructure Console</p>
+        </div>
+      </div>
+      <div class="controls">
+        <div class="segmented" role="group" aria-label="History window">
+          <button id="range-24h" class="seg-btn active" data-range="24h">24h</button>
+          <button id="range-7d" class="seg-btn" data-range="7d">7d</button>
+        </div>
+        <button id="run-probe-btn" class="btn">Run Probe</button>
+        <div class="meta-pill">
+          <span id="user-email">Access verified</span>
+          <span class="sep">·</span>
+          <span id="last-updated">Loading…</span>
+        </div>
+      </div>
+    </header>
+
+    <nav class="quick-links" aria-label="Service bookmarks">
+      <a href="https://malex.tech" target="_blank" rel="noopener">malex.tech</a>
+      <a href="https://media.malex.tech" target="_blank" rel="noopener">media.malex.tech</a>
+      <a href="https://healthchecks.io/projects/" target="_blank" rel="noopener">Healthchecks.io</a>
+      <a href="https://dash.cloudflare.com" target="_blank" rel="noopener">Cloudflare</a>
+      <a href="https://github.com/alexandrumarcus98" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+
+    <section class="summary-grid" id="summary-cards"></section>
+
+    <main class="main-grid">
+      <section class="card span-2" id="probes-section">
+        <div class="card-head">
+          <h2>Public Edge Probes</h2>
+          <span class="card-note">Cloudflare Cron · every 5 min</span>
+        </div>
+        <div id="probes-grid" class="probes-grid"></div>
+      </section>
+
+      <section class="card" id="vps-section">
+        <div class="card-head">
+          <h2>VPS Health (ubuntu-8gb-fsn1-1)</h2>
+          <span id="vps-age" class="card-note">Waiting for ingest…</span>
+        </div>
+        <div id="vps-content"></div>
+      </section>
+
+      <section class="card" id="backups-section">
+        <div class="card-head">
+          <h2>Backups &amp; Healthchecks.io</h2>
+          <span id="hc-age" class="card-note">—</span>
+        </div>
+        <div id="backups-content"></div>
+      </section>
+
+      <section class="card" id="analytics-section">
+        <div class="card-head">
+          <h2>Cloudflare Edge Traffic</h2>
+          <span id="cf-age" class="card-note">malex.tech (7d)</span>
+        </div>
+        <div id="analytics-content"></div>
+      </section>
+
+      <section class="card" id="incidents-section">
+        <div class="card-head">
+          <h2>Incident Timeline</h2>
+          <span class="card-note">State transitions</span>
+        </div>
+        <div id="incidents-content"></div>
+      </section>
+    </main>
+  </div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
+
