@@ -1,24 +1,21 @@
-# malex-dashboard — Claude Code Guide
+# CLAUDE.md — malex-dashboard
 
-Private monitoring & control dashboard (`dashboard.malex.tech`) hosted off-VPS on Azure for Students, exposing services exclusively via Cloudflare Tunnel + Cloudflare Zero Trust Access.
+## Purpose
 
-## Strict Azure for Students Cost Guardrails
+Private operations dashboard at `https://dashboard.malex.tech` built on **Cloudflare Workers + D1 + Cron Triggers** behind **Cloudflare Access** (`divine-base-c80e.cloudflareaccess.com`). Zero permanent Docker containers or RAM overhead on the Hetzner VPS.
 
-Never deviate from these resource settings without user approval:
-- **VM SKU:** `Standard_B2ats_v2` (2 vCPU AMD, 1 GiB RAM) — covered by 750 free hrs/mo for 12 months (`B1s` or ARM64 `Standard_B2pts_v2` are also free-tier eligible).
-- **OS Disk:** `--os-disk-size-gb 64 --storage-sku Premium_LRS` (`P6` 64 GiB Premium SSD — 2x 64 GiB P6 disks included free for 12 months). **Never** leave Azure's 127 GiB default.
-- **Public IPv4:** Use ONE `Standard` SKU Public IP (`~$3.72/mo`, ~$45/yr out of the $100/yr student credit). Needed because Microsoft retired Default Outbound Access in March 2026. If deleting the VM later, explicitly delete its Public IP too.
-- **Forbidden resources (cost traps):** Never create an Azure NAT Gateway, Azure Bastion, Load Balancer, App Gateway, or managed SQL/Cosmos unless explicitly requested.
-- **NSG firewall:** Keep ports `80` and `443` **closed**. Only allow `22/tcp` SSH from the admin's explicit IP/CIDR (`--ssh-source-cidr`).
+## Guardrails
 
-## Never
+- Never commit `.env` or echo secret values (`CF_API_TOKEN`, `HEALTHCHECKS_API_KEY`, `INGEST_BEARER_TOKEN`, `CF_ACCESS_CLIENT_SECRET`).
+- Keep `LOCAL_DEV_BYPASS` unset in `wrangler.jsonc` production config.
+- Exited `jibe-*` dev containers on the VPS are expected when paused for RAM; report counts only, never trigger alerts for stopped `jibe-*` containers.
+- Keep `/api/*` responses `Cache-Control: no-store` and `X-Robots-Tag: noindex, nofollow`.
 
-- **Never** commit `.env`, `TUNNEL_TOKEN`, SSH private keys, Beszel agent keys, or SQLite/data snapshots (`data/`).
-- **Never** bind `beszel`, `uptime-kuma`, or `homepage` to `0.0.0.0` on the Azure host. Keep host bindings on `127.0.0.1` only; `cloudflared` connects over the Docker bridge network `dashboard-net`.
+## Key Files
 
-## Verification Before Committing
-
-```bash
-docker compose config --quiet
-bash -n scripts/provision-azure.sh scripts/deploy-stack.sh
-```
+- `wrangler.jsonc` — Worker config, D1 binding (`malex-dashboard-db`), 5-min Cron Trigger, Custom Domain `dashboard.malex.tech`.
+- `migrations/0001_init.sql` — D1 tables (`probe_samples`, `vps_snapshots`, `incidents`, `cache_kv`).
+- `src/auth.ts` — Cloudflare Access JWT & Service Token verification (`jose`) + SHA-256 `timingSafeEqual` Bearer token check.
+- `src/cron.ts`, `src/probes.ts`, `src/external.ts` — Edge probes, Healthchecks.io read-only sync, throttled Cloudflare GraphQL Analytics.
+- `src/ingest.ts`, `src/api.ts` — Watchdog ingest handler & overview/history query API.
+- `public/` — Static operations console UI.
