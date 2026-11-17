@@ -9,7 +9,8 @@ function esc(value) {
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function fmtTime(epochSec) {
@@ -51,7 +52,7 @@ function badgeClass(status) {
 function renderSparkline(values, color = "#38bdf8") {
   const nums = values.filter((v) => typeof v === "number" && Number.isFinite(v));
   if (nums.length < 2) {
-    return `<div class="muted" style="padding:10px 0;">Collecting samples…</div>`;
+    return `<div class="muted sparkline-empty">Collecting samples…</div>`;
   }
   const min = Math.min(...nums);
   const max = Math.max(...nums);
@@ -133,18 +134,18 @@ function renderProbes(ov) {
       const cls = latest ? (latest.ok ? "badge-ok" : "badge-fail") : "badge-muted";
       const series = (p.recentSeries || []).map((pt) => pt.ms);
       const extra =
-        latest?.detail && latest.detail.gemini_model
-          ? `<div class="muted mono" style="margin-top:6px;">db_ok=${esc(String(latest.detail.db_ok))} · ${esc(
-              latest.detail.gemini_model,
-            )}</div>`
+        typeof latest?.detail?.db_ok === "boolean"
+          ? `<div class="muted mono mt-6">db_ok=${esc(String(latest.detail.db_ok))}${
+              latest.detail.service ? ` · ${esc(latest.detail.service)}` : ""
+            }</div>`
           : "";
-      const errLine = latest?.error ? `<div class="muted" style="color:var(--fail);">${esc(latest.error)}</div>` : "";
+      const errLine = latest?.error ? `<div class="muted text-fail mt-4">${esc(latest.error)}</div>` : "";
       return `<div class="subcard">
         <div class="row-between">
           <strong>${esc(p.label)}</strong>
           <span class="badge ${cls}">${esc(statusText)}</span>
         </div>
-        <div class="row-between muted mono" style="margin-top:6px;">
+        <div class="row-between muted mono mt-6">
           <span>${latest ? `${latest.latencyMs} ms` : "—"}</span>
           <span>24h: ${p.uptime24h ?? "—"}% · 7d: ${p.uptime7d ?? "—"}%</span>
         </div>
@@ -163,11 +164,11 @@ function renderProbes(ov) {
           <strong>Node: ${esc(n.nodeId)}</strong>
           <span class="badge ${badgeClass(n.status)}">${esc(n.status)}${n.stale ? " · STALE" : ""}</span>
         </div>
-        <div class="row-between muted mono" style="margin-top:6px;">
+        <div class="row-between muted mono mt-6">
           <span>Heartbeat</span>
           <span>${n.ageMinutes}m ago</span>
         </div>
-        ${n.summary ? `<div class="muted mono" style="margin-top:6px;">${esc(n.summary)}</div>` : ""}
+        ${n.summary ? `<div class="muted mono mt-6">${esc(n.summary)}</div>` : ""}
       </div>`,
     )
     .join("");
@@ -305,10 +306,10 @@ function renderIncidents(ov) {
             i.status.toUpperCase(),
           )}</span>
         </div>
-        <div class="muted mono" style="margin-top:4px;">
+        <div class="muted mono mt-4">
           ${esc(i.source)} · opened ${fmtTime(i.opened_at)}${i.resolved_at ? ` · resolved ${fmtTime(i.resolved_at)}` : ""}
         </div>
-        ${i.detail ? `<div class="muted" style="margin-top:4px;">${esc(i.detail)}</div>` : ""}
+        ${i.detail ? `<div class="muted mt-4">${esc(i.detail)}</div>` : ""}
       </div>`,
     )
     .join("")}</div>`;
@@ -330,16 +331,65 @@ function renderAll() {
   renderIncidents(ov);
 }
 
+function showError(message) {
+  const banner = document.getElementById("error-banner");
+  if (banner) {
+    banner.textContent = message;
+    banner.classList.remove("hidden");
+  }
+  const updated = document.getElementById("last-updated");
+  if (updated) {
+    updated.textContent = "Sync error";
+  }
+}
+
+function clearError() {
+  const banner = document.getElementById("error-banner");
+  if (banner) {
+    banner.textContent = "";
+    banner.classList.add("hidden");
+  }
+}
+
+async function readErrorMessage(res, label) {
+  let detail = "";
+  try {
+    const body = await res.json();
+    if (body && typeof body.error === "string") {
+      detail = body.error;
+    }
+  } catch {
+    // Ignore non-JSON error responses.
+  }
+  if (res.status === 401 || res.status === 403) {
+    return `${label}: Access session expired or unauthorized (${res.status}). Reload to re-authenticate.`;
+  }
+  return detail ? `${label}: ${detail}` : `${label}: HTTP ${res.status}`;
+}
+
+async function fetchHistory(range) {
+  const histRes = await fetch(`/api/history?range=${encodeURIComponent(range)}&includeProbes=0`);
+  if (!histRes.ok) {
+    throw new Error(await readErrorMessage(histRes, "History"));
+  }
+  return histRes.json();
+}
+
 async function loadDashboard() {
   const [ovRes, histRes] = await Promise.all([
     fetch("/api/overview"),
-    fetch(`/api/history?range=${encodeURIComponent(state.range)}`),
+    fetch(`/api/history?range=${encodeURIComponent(state.range)}&includeProbes=0`),
   ]);
   if (!ovRes.ok) {
-    throw new Error(`Overview HTTP ${ovRes.status}`);
+    throw new Error(await readErrorMessage(ovRes, "Overview"));
   }
   state.overview = await ovRes.json();
-  state.history = histRes.ok ? await histRes.json() : null;
+  if (!histRes.ok) {
+    renderAll();
+    throw new Error(await readErrorMessage(histRes, "History"));
+  }
+  state.history = await histRes.json();
+  clearError();
   renderAll();
 }
 
@@ -349,12 +399,16 @@ async function triggerManualProbe() {
   btn.textContent = "Probing…";
   try {
     const res = await fetch("/api/cron/run", { method: "POST" });
-    if (res.ok) {
-      state.overview = await res.json();
-      const histRes = await fetch(`/api/history?range=${encodeURIComponent(state.range)}`);
-      state.history = histRes.ok ? await histRes.json() : state.history;
-      renderAll();
+    if (!res.ok) {
+      showError(await readErrorMessage(res, "Run Probe"));
+      return;
     }
+    state.overview = await res.json();
+    state.history = await fetchHistory(state.range);
+    clearError();
+    renderAll();
+  } catch (err) {
+    showError(err instanceof Error ? `Run Probe: ${err.message}` : "Run Probe failed");
   } finally {
     btn.disabled = false;
     btn.textContent = "Run Probe";
@@ -364,20 +418,31 @@ async function triggerManualProbe() {
 document.getElementById("run-probe-btn").addEventListener("click", triggerManualProbe);
 for (const btn of document.querySelectorAll(".seg-btn")) {
   btn.addEventListener("click", async () => {
+    const prevRange = state.range;
     state.range = btn.dataset.range;
     for (const b of document.querySelectorAll(".seg-btn")) {
       b.classList.toggle("active", b === btn);
     }
-    const histRes = await fetch(`/api/history?range=${encodeURIComponent(state.range)}`);
-    if (histRes.ok) {
-      state.history = await histRes.json();
+    try {
+      state.history = await fetchHistory(state.range);
+      clearError();
       renderAll();
+    } catch (err) {
+      state.range = prevRange;
+      for (const b of document.querySelectorAll(".seg-btn")) {
+        b.classList.toggle("active", b.dataset.range === prevRange);
+      }
+      showError(err instanceof Error ? err.message : "Failed to load history");
     }
   });
 }
 
 loadDashboard().catch((err) => {
-  document.getElementById("last-updated").textContent = err.message;
+  showError(err instanceof Error ? err.message : "Failed to load dashboard");
 });
-setInterval(() => loadDashboard().catch(() => {}), 60000);
+setInterval(() => {
+  loadDashboard().catch((err) => {
+    showError(err instanceof Error ? err.message : "Refresh failed");
+  });
+}, 60000);
 

@@ -92,14 +92,19 @@ export async function verifyIngestAuth(
     return { ok: false, status: 401, reason: "Missing Access Service Token assertion" };
   }
 
-  const audiences = [env.CF_INGEST_ACCESS_AUD, env.CF_ACCESS_AUD].filter(
-    (v): v is string => Boolean(v && v.length > 0),
-  );
+  const audience =
+    env.CF_INGEST_ACCESS_AUD && env.CF_INGEST_ACCESS_AUD.length > 0
+      ? env.CF_INGEST_ACCESS_AUD
+      : env.CF_ACCESS_AUD;
+  if (!audience) {
+    return { ok: false, status: 500, reason: "Missing Access Service Token audience" };
+  }
+
   try {
     const jwks = getJwks(env.CF_ACCESS_TEAM_DOMAIN);
     await jwtVerify(jwt, jwks, {
       issuer: `https://${env.CF_ACCESS_TEAM_DOMAIN}`,
-      audience: audiences,
+      audience,
     });
     return { ok: true };
   } catch {
@@ -108,7 +113,11 @@ export async function verifyIngestAuth(
 }
 
 /** Build a non-cacheable JSON response with baseline security headers. */
-export function jsonResponse(body: unknown, status = 200): Response {
+export function jsonResponse(
+  body: unknown,
+  status = 200,
+  extraHeaders?: Record<string, string>,
+): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: {
@@ -116,6 +125,12 @@ export function jsonResponse(body: unknown, status = 200): Response {
       "Cache-Control": "no-store",
       "X-Robots-Tag": "noindex, nofollow",
       "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY",
+      "Referrer-Policy": "same-origin",
+      "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+      "Permissions-Policy": "geolocation=(), camera=(), microphone=()",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
+      ...extraHeaders,
     },
   });
 }

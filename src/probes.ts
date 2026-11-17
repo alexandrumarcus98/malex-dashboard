@@ -23,21 +23,26 @@ async function probeOne(target: ProbeTarget, nowSec: number): Promise<ProbeResul
 
     if (target.parseJson) {
       try {
-        const parsed = (await resp.json()) as Record<string, unknown>;
-        detailJson = JSON.stringify({
-          status: parsed.status ?? null,
-          db_ok: parsed.db_ok ?? null,
-          service: parsed.service ?? null,
-          gemini_model: parsed.gemini_model ?? null,
-          seedbox_host: parsed.seedbox_host ?? null,
-        });
-        if (parsed.status !== "healthy" || parsed.db_ok === false) {
+        const parsed = (await resp.json()) as unknown;
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
           ok = false;
-          error = `Unhealthy payload: status=${String(parsed.status)} db_ok=${String(parsed.db_ok)}`;
+          error = ok ? "Invalid JSON health response" : `HTTP ${resp.status} (invalid JSON)`;
+        } else {
+          const rec = parsed as Record<string, unknown>;
+          const dbOk = typeof rec.db_ok === "boolean" ? rec.db_ok : null;
+          detailJson = JSON.stringify({
+            status: rec.status ?? null,
+            db_ok: dbOk,
+            service: typeof rec.service === "string" ? rec.service : null,
+          });
+          if (rec.status !== "healthy" || dbOk === false) {
+            ok = false;
+            error = `Unhealthy payload: status=${String(rec.status)} db_ok=${String(dbOk)}`;
+          }
         }
       } catch {
+        error = ok ? "Invalid JSON health response" : `HTTP ${resp.status} (invalid JSON)`;
         ok = false;
-        error = "Invalid JSON health response";
       }
     } else {
       await resp.body?.cancel();

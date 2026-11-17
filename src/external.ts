@@ -1,7 +1,7 @@
 import { syncIncidentState } from "./incidents";
 import type { CfDayPoint, Env, HealthcheckItem } from "./types";
 
-async function writeCache(db: D1Database, key: string, value: unknown, nowSec: number): Promise<void> {
+export async function writeCache(db: D1Database, key: string, value: unknown, nowSec: number): Promise<void> {
   await db
     .prepare(
       "INSERT INTO cache_kv (key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
@@ -36,6 +36,8 @@ export async function syncHealthchecks(env: Env, nowSec: number): Promise<void> 
       signal: AbortSignal.timeout(8000),
     });
     if (!resp.ok) {
+      console.warn(`syncHealthchecks HTTP ${resp.status}`);
+      await resp.body?.cancel();
       return;
     }
     const data = (await resp.json()) as { checks?: Array<Record<string, unknown>> };
@@ -59,8 +61,9 @@ export async function syncHealthchecks(env: Env, nowSec: number): Promise<void> 
       detail: downChecks.map((c) => `${c.name} last ping ${c.lastPing ?? "never"}`).join("; ") || null,
       nowSec,
     });
-  } catch {
+  } catch (err) {
     // Non-fatal: keep last cached Healthchecks snapshot on transient fetch issues.
+    console.error("syncHealthchecks failed:", err instanceof Error ? err.message : String(err));
   }
 }
 
@@ -106,9 +109,12 @@ export async function syncCfAnalytics(env: Env, nowSec: number, force = false): 
       signal: AbortSignal.timeout(8000),
     });
     if (!resp.ok) {
+      console.warn(`syncCfAnalytics HTTP ${resp.status}`);
+      await resp.body?.cancel();
       return;
     }
     const payload = (await resp.json()) as {
+      errors?: Array<{ message?: string }>;
       data?: {
         viewer?: {
           zones?: Array<{
@@ -118,9 +124,18 @@ export async function syncCfAnalytics(env: Env, nowSec: number, force = false): 
             }>;
           }>;
         };
-      };
+      } | null;
     };
-    const groups = payload.data?.viewer?.zones?.[0]?.httpRequests1dGroups ?? [];
+    if (payload.errors?.length || !payload.data) {
+      const msg = payload.errors?.map((e) => e.message ?? "GraphQL error").join("; ") || "missing data";
+      console.warn(`syncCfAnalytics GraphQL error: ${msg}`);
+      return;
+    }
+    const groups = payload.data.viewer?.zones?.[0]?.httpRequests1dGroups;
+    if (!Array.isArray(groups)) {
+      console.warn("syncCfAnalytics missing httpRequests1dGroups");
+      return;
+    }
     const points: CfDayPoint[] = groups.map((g) => ({
       date: g.dimensions.date,
       requests: g.sum.requests ?? 0,
@@ -130,8 +145,9 @@ export async function syncCfAnalytics(env: Env, nowSec: number, force = false): 
       pageViews: g.sum.pageViews ?? 0,
     }));
     await writeCache(env.DB, "cf_analytics", points, nowSec);
-  } catch {
+  } catch (err) {
     // Non-fatal: keep last cached analytics points.
+    console.error("syncCfAnalytics failed:", err instanceof Error ? err.message : String(err));
   }
 }
 

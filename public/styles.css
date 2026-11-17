@@ -249,6 +249,21 @@ body {
 
 .mono { font-family: var(--mono); }
 .muted { color: var(--muted); font-size: 0.8rem; }
+.mt-4 { margin-top: 4px; }
+.mt-6 { margin-top: 6px; }
+.text-fail { color: var(--fail); }
+.sparkline-empty { padding: 10px 0; }
+.hidden { display: none; }
+
+.error-banner {
+  background: var(--fail-bg);
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  color: #fecaca;
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  font-size: 0.84rem;
+}
 
 .kv-grid {
   display: grid;

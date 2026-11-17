@@ -1,6 +1,6 @@
 import { readCache } from "./external";
 import { PROBE_TARGETS } from "./probes";
-import type { CfDayPoint, Env, HealthcheckItem, IncidentRow } from "./types";
+import { NODE_STALE_SEC, type CfDayPoint, type Env, type HealthcheckItem, type IncidentRow } from "./types";
 
 interface VpsSnapshotRow {
   id: number;
@@ -51,8 +51,12 @@ export async function getOverview(env: Env, userEmail: string, nowSec: number): 
   const [vpsRowsRes, probeStatsRes, recentProbesRes, incidentsRes, hcCache, cfCache] = await Promise.all([
     env.DB.prepare(
       `SELECT v.* FROM vps_snapshots v
-       INNER JOIN (SELECT node_id, MAX(created_at) AS max_ts FROM vps_snapshots GROUP BY node_id) latest
-       ON v.node_id = latest.node_id AND v.created_at = latest.max_ts
+       WHERE v.id = (
+         SELECT s.id FROM vps_snapshots s
+         WHERE s.node_id = v.node_id
+         ORDER BY s.created_at DESC, s.id DESC
+         LIMIT 1
+       )
        ORDER BY CASE WHEN v.node_id = 'vps' THEN 0 ELSE 1 END, v.node_id ASC`,
     ).all<VpsSnapshotRow>(),
     env.DB.prepare(
@@ -134,7 +138,7 @@ export async function getOverview(env: Env, userEmail: string, nowSec: number): 
   const nodes = vpsRowsRes.results.map((r) => ({
     nodeId: r.node_id,
     status: r.status,
-    stale: nowSec - r.created_at > 25 * 60,
+    stale: nowSec - r.created_at > NODE_STALE_SEC,
     ageMinutes: Math.max(0, Math.round((nowSec - r.created_at) / 60)),
     diskPct: r.disk_pct,
     memAvailMb: r.mem_avail_mb,
@@ -156,7 +160,8 @@ export async function getOverview(env: Env, userEmail: string, nowSec: number): 
   const incidents = incidentsRes.results;
   const openCritical = incidents.some((i) => i.status === "open" && i.severity === "critical");
   const openWarn = incidents.some((i) => i.status === "open");
-  const overallStatus = openCritical ? "FAIL" : openWarn || (vps && vps.stale) ? "WARN" : "OK";
+  const anyNodeStale = nodes.some((n) => n.stale);
+  const overallStatus = openCritical ? "FAIL" : openWarn || anyNodeStale ? "WARN" : "OK";
 
   return {
     generatedAt: nowSec,
@@ -177,55 +182,63 @@ export async function getOverview(env: Env, userEmail: string, nowSec: number): 
   };
 }
 
-/** Return time-series points for VPS telemetry and probe latency over 24h or 7d. */
+/** Return time-series points for VPS telemetry and (optionally) probe latency over 24h or 7d. */
 export async function getHistory(
   db: D1Database,
   range: "24h" | "7d",
   nowSec: number,
+  includeProbes = true,
 ): Promise<Record<string, unknown>> {
   const windowSec = range === "7d" ? 7 * 86400 : 24 * 3600;
   const since = nowSec - windowSec;
+  const probeLimit = range === "7d" ? 6500 : 1500;
 
-  const [vpsRes, probeRes] = await Promise.all([
-    db
-      .prepare(
-        `SELECT disk_pct, mem_avail_mb, mem_total_mb, swap_used_pct, created_at
-         FROM vps_snapshots
-         WHERE node_id = 'vps' AND created_at >= ?
-         ORDER BY created_at ASC
-         LIMIT 720`,
-      )
-      .bind(since)
-      .all<{
-        disk_pct: number | null;
-        mem_avail_mb: number | null;
-        mem_total_mb: number | null;
-        swap_used_pct: number | null;
-        created_at: number;
-      }>(),
-    db
-      .prepare(
-        `SELECT target, ok, latency_ms, checked_at
-         FROM probe_samples
-         WHERE checked_at >= ?
-         ORDER BY checked_at ASC
-         LIMIT 2500`,
-      )
-      .bind(since)
-      .all<{ target: string; ok: number; latency_ms: number; checked_at: number }>(),
-  ]);
+  const vpsQuery = db
+    .prepare(
+      `SELECT disk_pct, mem_avail_mb, mem_total_mb, swap_used_pct, created_at
+       FROM vps_snapshots
+       WHERE node_id = 'vps' AND created_at >= ?
+       ORDER BY created_at DESC, id DESC
+       LIMIT 720`,
+    )
+    .bind(since)
+    .all<{
+      disk_pct: number | null;
+      mem_avail_mb: number | null;
+      mem_total_mb: number | null;
+      swap_used_pct: number | null;
+      created_at: number;
+    }>();
+
+  const probeQuery = includeProbes
+    ? db
+        .prepare(
+          `SELECT target, ok, latency_ms, checked_at
+           FROM probe_samples
+           WHERE checked_at >= ?
+           ORDER BY checked_at DESC, id DESC
+           LIMIT ?`,
+        )
+        .bind(since, probeLimit)
+        .all<{ target: string; ok: number; latency_ms: number; checked_at: number }>()
+    : Promise.resolve({ results: [] as Array<{ target: string; ok: number; latency_ms: number; checked_at: number }> });
+
+  const [vpsRes, probeRes] = await Promise.all([vpsQuery, probeQuery]);
+
+  const vpsRows = [...vpsRes.results].reverse();
+  const probeRows = [...probeRes.results].reverse();
 
   return {
     range,
     since,
-    vpsSeries: vpsRes.results.map((r) => ({
+    vpsSeries: vpsRows.map((r) => ({
       t: r.created_at,
       diskPct: r.disk_pct,
       memAvailMb: r.mem_avail_mb,
       memTotalMb: r.mem_total_mb,
       swapUsedPct: r.swap_used_pct,
     })),
-    probeSeries: probeRes.results.map((p) => ({
+    probeSeries: probeRows.map((p) => ({
       t: p.checked_at,
       target: p.target,
       ok: p.ok === 1,

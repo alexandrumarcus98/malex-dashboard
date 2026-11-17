@@ -1,3 +1,6 @@
+export const NODE_STALE_SEC = 35 * 60;
+export const MANUAL_CRON_COOLDOWN_SEC = 60;
+
 export interface Env {
   DB: D1Database;
   ASSETS: Fetcher;

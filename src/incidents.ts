@@ -14,9 +14,9 @@ export async function syncIncidentState(
   },
 ): Promise<void> {
   const existing = await db
-    .prepare("SELECT id, severity, title FROM incidents WHERE source = ? AND status = 'open' ORDER BY opened_at DESC LIMIT 1")
+    .prepare("SELECT id, severity, title, detail FROM incidents WHERE source = ? AND status = 'open' ORDER BY opened_at DESC LIMIT 1")
     .bind(params.source)
-    .first<{ id: number; severity: string; title: string }>();
+    .first<{ id: number; severity: string; title: string; detail: string | null }>();
 
   if (params.isHealthy) {
     if (existing) {
@@ -29,10 +29,15 @@ export async function syncIncidentState(
   }
 
   if (existing) {
-    if (existing.severity !== params.severity || existing.title !== params.title) {
+    const nextDetail = params.detail ?? null;
+    if (
+      existing.severity !== params.severity ||
+      existing.title !== params.title ||
+      (existing.detail ?? null) !== nextDetail
+    ) {
       await db
         .prepare("UPDATE incidents SET severity = ?, title = ?, detail = ? WHERE id = ?")
-        .bind(params.severity, params.title, params.detail, existing.id)
+        .bind(params.severity, params.title, nextDetail, existing.id)
         .run();
     }
     return;

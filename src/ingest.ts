@@ -54,9 +54,13 @@ export async function handleIngest(
     return { ok: false, error: "Request body must be a JSON object" };
   }
   const body = rawBody as Partial<VpsIngestPayload>;
-  const nodeId = typeof body.node_id === "string" && /^[a-zA-Z0-9_-]{1,32}$/.test(body.node_id)
-    ? body.node_id
-    : defaultNodeId;
+  let nodeId = defaultNodeId;
+  if (body.node_id !== undefined && body.node_id !== null) {
+    if (typeof body.node_id !== "string" || !/^[a-zA-Z0-9_-]{1,32}$/.test(body.node_id)) {
+      return { ok: false, error: "Invalid node_id; expected 1-32 alphanumeric, underscore, or hyphen characters" };
+    }
+    nodeId = body.node_id;
+  }
   const status = body.status === "OK" || body.status === "WARN" || body.status === "FAIL" ? body.status : null;
   if (!status) {
     return { ok: false, error: "Invalid status; expected OK, WARN, or FAIL" };
@@ -113,12 +117,12 @@ export async function handleIngest(
     nowSec,
   });
 
-  if (nodeId === "vps") {
+  if (nodeId === "vps" || nodeId === "azure-fr") {
     await syncIncidentState(db, {
-      source: "vps:heartbeat",
+      source: `${nodeId}:heartbeat`,
       isHealthy: true,
       severity: "warn",
-      title: "VPS watchdog heartbeat restored",
+      title: `${nodeId === "vps" ? "VPS watchdog" : nodeId} heartbeat restored`,
       detail: null,
       nowSec,
     });
