@@ -4,6 +4,12 @@
 
 Private operations dashboard at `https://dashboard.malex.tech` built on **Cloudflare Workers + D1 + Cron Triggers** behind **Cloudflare Access** (`divine-base-c80e.cloudflareaccess.com`). Zero permanent Docker containers or RAM overhead on the Hetzner VPS.
 
+## Project Skills
+
+Read the matching skill in `.agents/skills/` (mirrored at `.claude/skills/`) when working in that area:
+- `dashboard-worker`: Worker auth/audience separation, Cron probes, D1 queries, ingest validation, `azure-probe/`, and Vitest suite.
+- `dashboard-ui-ops`: Static console UI (`public/`), strict `style-src 'self'` CSP, security headers, D1 migrations, and Wrangler deploys.
+
 ## Guardrails
 
 - Never commit `.env`, `azure-probe/local.settings.json`, or echo secret values (`CF_API_TOKEN`, `CF_ANALYTICS_TOKEN`, `HEALTHCHECKS_API_KEY`, `INGEST_BEARER_TOKEN`, `CF_ACCESS_CLIENT_SECRET`).
