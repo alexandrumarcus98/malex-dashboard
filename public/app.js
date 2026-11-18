@@ -1,8 +1,28 @@
+const HOUR = 3600;
+
+const THRESHOLDS = {
+  diskWarn: 80,
+  diskFail: 90,
+  memAvailWarnMb: 1000,
+  staleMin: 35,
+  resticWarnH: 26,
+  tarWarnH: 26,
+  seedboxWarnH: 2,
+  latencyWarnMs: 300,
+};
+
 const state = {
   range: "24h",
   overview: null,
   history: null,
+  updatedAt: null,
 };
+
+/* ---------------- helpers ---------------- */
+
+function nowSec() {
+  return Math.floor(Date.now() / 1000);
+}
 
 function esc(value) {
   return String(value ?? "")
@@ -23,15 +43,26 @@ function fmtTime(epochSec) {
   });
 }
 
-function fmtRelIso(iso) {
-  if (!iso) return "never";
-  const ms = Date.now() - Date.parse(iso);
-  const min = Math.round(ms / 60000);
-  if (min < 2) return "just now";
-  if (min < 60) return `${min}m ago`;
-  const h = Math.round(min / 60);
-  if (h < 48) return `${h}h ago`;
+function fmtAgeMin(min) {
+  if (!Number.isFinite(min) || min < 1) return "just now";
+  if (min < 60) return `${Math.round(min)}m ago`;
+  const h = min / 60;
+  if (h < 48) return `${h < 10 ? h.toFixed(1).replace(/\.0$/, "") : Math.round(h)}h ago`;
   return `${Math.round(h / 24)}d ago`;
+}
+
+function fmtRelIso(isoStr) {
+  if (!isoStr) return "never";
+  const parsed = Date.parse(isoStr);
+  if (!Number.isFinite(parsed)) return "unknown";
+  return fmtAgeMin(Math.max(0, (Date.now() - parsed) / 60000));
+}
+
+function fmtDuration(sec) {
+  if (!Number.isFinite(sec) || sec < 0) return "—";
+  if (sec < 90) return `${Math.max(1, Math.round(sec / 60))}m`;
+  if (sec < 2 * HOUR) return `${Math.round(sec / 60)}m`;
+  return `${Math.round(sec / HOUR)}h`;
 }
 
 function fmtBytes(bytes) {
@@ -41,305 +72,474 @@ function fmtBytes(bytes) {
   return `${(bytes / 1024 ** exp).toFixed(exp === 0 ? 0 : 1)} ${units[exp]}`;
 }
 
-function badgeClass(status) {
-  const s = String(status).toLowerCase();
-  if (s === "ok" || s === "up" || s === "healthy" || s === "resolved") return "badge-ok";
-  if (s === "warn" || s === "grace") return "badge-warn";
-  if (s === "fail" || s === "down" || s === "open" || s === "critical") return "badge-fail";
-  return "badge-muted";
+function probeName(p) {
+  return String(p?.label ?? "").split("/")[0] || "Endpoint";
 }
 
-function renderSparkline(values, color = "#38bdf8") {
-  const nums = values.filter((v) => typeof v === "number" && Number.isFinite(v));
-  if (nums.length < 2) {
-    return `<div class="muted sparkline-empty">Collecting samples…</div>`;
+function probeSubUrl(p) {
+  const raw = String(p?.url ?? "");
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    if (parsed.pathname && parsed.pathname !== "/") {
+      return parsed.pathname;
+    }
+  } catch {
+    // Fall back to raw URL string when not parseable.
   }
-  const min = Math.min(...nums);
-  const max = Math.max(...nums);
-  const span = max - min || 1;
-  const w = 240;
-  const h = 44;
-  const pts = nums
-    .map((v, idx) => {
-      const x = ((idx / (nums.length - 1)) * (w - 4) + 2).toFixed(1);
-      const y = (h - 4 - ((v - min) / span) * (h - 10)).toFixed(1);
-      return `${x},${y}`;
-    })
-    .join(" ");
-  return `<svg class="sparkline" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
-    <polyline fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" points="${pts}" />
-  </svg>`;
+  return raw.replace(/\/$/, "");
 }
 
-function renderSummary(ov) {
-  const vps = ov.vps;
-  const memUsedPct =
-    vps && vps.memAvailMb != null && vps.memTotalMb
-      ? Math.round(((vps.memTotalMb - vps.memAvailMb) / vps.memTotalMb) * 100)
-      : null;
+/** Map any status word to ok | warn | fail | muted. */
+function tone(status) {
+  const s = String(status ?? "").toLowerCase();
+  if (["ok", "up", "healthy", "resolved", "new"].includes(s)) return "ok";
+  if (["warn", "grace", "late"].includes(s)) return "warn";
+  if (["fail", "down", "open", "critical", "error"].includes(s)) return "fail";
+  return "muted";
+}
 
-  const cfDays = ov.cfAnalytics?.days ?? [];
-  const cfReqs7d = cfDays.reduce((acc, d) => acc + (d.requests || 0), 0);
-  const cfCached7d = cfDays.reduce((acc, d) => acc + (d.cachedRequests || 0), 0);
-  const cfCachePct = cfReqs7d > 0 ? ((cfCached7d / cfReqs7d) * 100).toFixed(1) : "—";
+function stateLabel(t, text) {
+  const cls = t === "ok" ? "" : ` text-${t}`;
+  return `<span class="state${cls}"><span class="dot ${t}"></span>${esc(text)}</span>`;
+}
 
-  const probesUp = (ov.probes || []).filter((p) => p.latest?.ok).length;
-  const probesTotal = (ov.probes || []).length;
-  const openIncidents = (ov.incidents || []).filter((i) => i.status === "open").length;
+function widthClass(pct) {
+  const safe = Number.isFinite(pct) ? pct : 0;
+  const step = Math.max(0, Math.min(100, Math.round(safe / 5) * 5));
+  return `w-${step}`;
+}
 
-  const cards = [
-    {
-      label: "Overall",
-      value: ov.overallStatus,
-      sub: openIncidents ? `${openIncidents} active alert(s)` : "All systems nominal",
-    },
-    {
-      label: "Edge Endpoints",
-      value: `${probesUp}/${probesTotal} UP`,
-      sub: "malex.tech + media",
-    },
-    {
-      label: "VPS Memory Free",
-      value: vps?.memAvailMb != null ? `${vps.memAvailMb} MiB` : "—",
-      sub: memUsedPct != null ? `${memUsedPct}% used · Swap ${vps.swapUsedPct ?? 0}%` : "Waiting for VPS push",
-    },
-    {
-      label: "VPS Root Disk",
-      value: vps?.diskPct != null ? `${vps.diskPct}%` : "—",
-      sub: vps ? `Last ping ${vps.ageMinutes}m ago` : "Every 15m via cron",
-    },
-    {
-      label: "CF 7d Traffic",
-      value: cfReqs7d.toLocaleString(),
-      sub: `${cfCachePct}% edge cached`,
-    },
-  ];
+function meter(pct, t) {
+  const cls = t === "warn" || t === "fail" ? ` ${t}` : "";
+  return `<div class="meter"><span class="meter-fill ${widthClass(pct)}${cls}"></span></div>`;
+}
 
-  document.getElementById("summary-cards").innerHTML = cards
-    .map(
-      (c) => `<div class="stat-card">
-        <div class="stat-label">${esc(c.label)}</div>
-        <div class="stat-value">${esc(c.value)}</div>
-        <div class="stat-sub">${esc(c.sub)}</div>
-      </div>`,
-    )
+/** lo/hi fix the y-axis so normal jitter stays flat and real changes stand out. */
+function sparkline(values, { large = false, t = "", area = false, lo, hi } = {}) {
+  const nums = (values || []).filter((v) => typeof v === "number" && Number.isFinite(v));
+  if (nums.length < 2) return `<div class="muted">Collecting samples…</div>`;
+  const w = 300;
+  const h = large ? 64 : 28;
+  const min = lo ?? Math.min(...nums);
+  const max = Math.max(hi ?? -Infinity, ...nums);
+  const span = max - min || 1;
+  const pts = nums.map((v, i) => [
+    ((i / (nums.length - 1)) * w).toFixed(1),
+    (h - 3 - ((v - min) / span) * (h - 6)).toFixed(1),
+  ]);
+  const line = pts.map((p) => p.join(",")).join(" ");
+  const areaPath = area ? `<polygon class="area" points="0,${h} ${line} ${w},${h}" />` : "";
+  const cls = ["spark", large ? "spark-lg" : "", t === "warn" || t === "fail" ? t : ""].filter(Boolean).join(" ");
+  return `<svg class="${cls}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">${areaPath}<polyline points="${line}" /></svg>`;
+}
+
+/* ---------------- derived checks ---------------- */
+
+/** Everything that is not OK, most severe first. Drives the title and the attention box. */
+function collectIssues(ov) {
+  const out = [];
+  for (const p of ov.probes || []) {
+    if (!p.latest) continue;
+    const name = probeName(p);
+    if (!p.latest.ok) {
+      out.push({
+        t: "fail",
+        text: `${name} is down (${p.latest.statusCode || p.latest.error || "unreachable"})`,
+        href: "#endpoints",
+      });
+    } else if (p.latest.latencyMs > THRESHOLDS.latencyWarnMs) {
+      out.push({ t: "warn", text: `${name} is slow: ${p.latest.latencyMs} ms`, href: "#endpoints" });
+    }
+  }
+
+  for (const n of (ov.nodes || []).filter((x) => x.nodeId !== "vps")) {
+    if (n.stale || (n.ageMinutes != null && n.ageMinutes > THRESHOLDS.staleMin)) {
+      out.push({ t: "warn", text: `${n.nodeId} heartbeat is ${n.ageMinutes}m old`, href: "#endpoints" });
+    } else if (tone(n.status) !== "ok") {
+      out.push({ t: tone(n.status), text: `${n.nodeId} reports ${n.status}`, href: "#endpoints" });
+    }
+  }
+
+  const hcChecks = ov.healthchecks?.checks || [];
+  const hcWarned = (pattern) => hcChecks.some((c) => tone(c.status) !== "ok" && pattern.test(String(c.name ?? "")));
+
+  const v = ov.vps;
+  if (!v) {
+    out.push({ t: "warn", text: "No VPS telemetry received yet", href: "#vps" });
+  } else {
+    let vpsSpecificIssue = false;
+    if (v.stale || (v.ageMinutes != null && v.ageMinutes > THRESHOLDS.staleMin)) {
+      out.push({ t: "warn", text: `VPS last reported ${v.ageMinutes}m ago`, href: "#vps" });
+      vpsSpecificIssue = true;
+    }
+    if (v.diskPct != null && v.diskPct >= THRESHOLDS.diskWarn) {
+      out.push({
+        t: v.diskPct >= THRESHOLDS.diskFail ? "fail" : "warn",
+        text: `VPS root disk at ${v.diskPct}%`,
+        href: "#vps",
+      });
+      vpsSpecificIssue = true;
+    }
+    if (v.memAvailMb != null && v.memAvailMb < THRESHOLDS.memAvailWarnMb) {
+      out.push({ t: "warn", text: `VPS memory low: ${v.memAvailMb} MiB free`, href: "#vps" });
+      vpsSpecificIssue = true;
+    }
+    for (const c of v.containers || []) {
+      if (!c.healthy) {
+        out.push({ t: "fail", text: `Container ${c.name}: ${c.status}`, href: "#vps" });
+        vpsSpecificIssue = true;
+      }
+    }
+    for (const p of v.ports || []) {
+      if (!p.open) {
+        out.push({ t: "fail", text: `Tunnel port ${p.port} (${p.label}) closed`, href: "#vps" });
+        vpsSpecificIssue = true;
+      }
+    }
+    if (v.resticAgeH != null && v.resticAgeH > THRESHOLDS.resticWarnH && !hcWarned(/restic/i)) {
+      out.push({ t: "warn", text: `Restic offsite backup is ${fmtAgeMin(v.resticAgeH * 60)}`, href: "#backups" });
+      vpsSpecificIssue = true;
+    }
+    if (v.muuviesAgeH != null && v.muuviesAgeH > THRESHOLDS.tarWarnH && !hcWarned(/muuvies/i)) {
+      out.push({ t: "warn", text: `Muuvies tar backup is ${fmtAgeMin(v.muuviesAgeH * 60)}`, href: "#backups" });
+      vpsSpecificIssue = true;
+    }
+    if (v.seedboxSyncAgeH != null && v.seedboxSyncAgeH > THRESHOLDS.seedboxWarnH && !hcWarned(/seedbox/i)) {
+      out.push({ t: "warn", text: `Seedbox sync is ${fmtAgeMin(v.seedboxSyncAgeH * 60)}`, href: "#backups" });
+      vpsSpecificIssue = true;
+    }
+    if (!vpsSpecificIssue && tone(v.status) !== "ok") {
+      out.push({ t: tone(v.status), text: `VPS reports ${v.status}`, href: "#vps" });
+    }
+  }
+
+  for (const c of hcChecks) {
+    if (tone(c.status) !== "ok") {
+      out.push({ t: tone(c.status), text: `${c.name} is late: last ping ${fmtRelIso(c.lastPing)}`, href: "#backups" });
+    }
+  }
+
+  const rank = { fail: 0, warn: 1, muted: 2 };
+  return out.sort((a, b) => (rank[a.t] ?? 2) - (rank[b.t] ?? 2));
+}
+
+/* ---------------- renderers ---------------- */
+
+function renderStatus(ov, issues) {
+  const worst = issues[0]?.t ?? "ok";
+  const title = document.getElementById("status-title");
+  title.className = worst === "ok" ? "" : worst;
+  title.textContent =
+    worst === "ok" ? "All systems OK" : issues.length === 1 ? "1 thing needs attention" : `${issues.length} things need attention`;
+  document.getElementById("overall-dot").className = `dot ${worst}`;
+
+  const probes = ov.probes || [];
+  const up = probes.filter((p) => p.latest?.ok).length;
+  const lastBackupH = ov.vps
+    ? Math.min(
+        ov.vps.resticAgeH ?? Infinity,
+        ov.vps.muuviesAgeH ?? Infinity,
+      )
+    : null;
+  const open = (ov.incidents || []).filter((i) => i.status === "open").length;
+  const facts = [
+    `${up}/${probes.length} endpoints up`,
+    ov.vps ? `VPS reported ${fmtAgeMin(ov.vps.ageMinutes)}` : "no VPS report yet",
+    Number.isFinite(lastBackupH) ? `last backup ${fmtAgeMin(lastBackupH * 60)}` : null,
+    open ? `${open} open incident${open > 1 ? "s" : ""}` : "no open incidents",
+  ].filter(Boolean);
+  document.getElementById("status-facts").textContent = facts.join(" · ");
+
+  document.getElementById("user-email").textContent = ov.userEmail || "Access verified";
+  const updatedTs = ov.generatedAt || state.updatedAt || nowSec();
+  document.getElementById("last-updated").textContent = `updated ${fmtAgeMin(Math.max(0, (nowSec() - updatedTs) / 60))}`;
+
+  const box = document.getElementById("attention");
+  box.hidden = issues.length === 0;
+  box.className = `attention${worst === "fail" ? " fail" : ""}`;
+  document.getElementById("attention-list").innerHTML = issues
+    .map((i) => `<li><a href="${esc(i.href)}"><span class="dot ${esc(i.t)}"></span><span>${esc(i.text)}</span><span class="go">View</span></a></li>`)
     .join("");
 }
 
-function renderProbes(ov) {
-  const html = (ov.probes || [])
+function renderEndpoints(ov) {
+  const probes = ov.probes || [];
+  if (!probes.length) {
+    document.getElementById("endpoints-content").innerHTML = `<p class="muted">No endpoint probes configured yet.</p>`;
+    return;
+  }
+
+  const rows = probes
     .map((p) => {
-      const latest = p.latest;
-      const statusText = latest ? (latest.ok ? `UP · ${latest.statusCode}` : `DOWN · ${latest.statusCode}`) : "PENDING";
-      const cls = latest ? (latest.ok ? "badge-ok" : "badge-fail") : "badge-muted";
-      const series = (p.recentSeries || []).map((pt) => pt.ms);
-      const extra =
-        typeof latest?.detail?.db_ok === "boolean"
-          ? `<div class="muted mono mt-6">db_ok=${esc(String(latest.detail.db_ok))}${
-              latest.detail.service ? ` · ${esc(latest.detail.service)}` : ""
-            }</div>`
-          : "";
-      const errLine = latest?.error ? `<div class="muted text-fail mt-4">${esc(latest.error)}</div>` : "";
-      return `<div class="subcard">
-        <div class="row-between">
-          <strong>${esc(p.label)}</strong>
-          <span class="badge ${cls}">${esc(statusText)}</span>
-        </div>
-        <div class="row-between muted mono mt-6">
-          <span>${latest ? `${latest.latencyMs} ms` : "—"}</span>
-          <span>24h: ${p.uptime24h ?? "—"}% · 7d: ${p.uptime7d ?? "—"}%</span>
-        </div>
-        ${extra}
-        ${errLine}
-        ${renderSparkline(series, latest?.ok === false ? "#ef4444" : "#22c55e")}
+      const l = p.latest;
+      const slow = l?.ok && l.latencyMs > THRESHOLDS.latencyWarnMs;
+      const t = !l ? "muted" : !l.ok ? "fail" : slow ? "warn" : "ok";
+      const statusText = !l ? "Pending" : l.ok ? `${l.statusCode}` : `${l.statusCode || "Error"}`;
+      const baseUrl = probeSubUrl(p);
+      const parts = [baseUrl];
+      if (l?.detail && typeof l.detail.db_ok === "boolean") parts.push(`db_ok=${l.detail.db_ok}`);
+      if (l && !l.ok && l.error) parts.push(l.error);
+      const sub = parts.filter(Boolean).join(" · ");
+      const u24 = p.uptime24h != null ? `${p.uptime24h}%` : "—";
+      const u7d = p.uptime7d != null ? `${p.uptime7d}%` : "—";
+      const sparkTone = !l ? "" : !l.ok ? "fail" : slow ? "warn" : "";
+      const series = (p.recentSeries || []).map((x) => x.ms);
+
+      return `<tr>
+        <td><span class="ep-name">${esc(probeName(p))}</span><span class="ep-sub mono">${esc(sub)}</span></td>
+        <td>${stateLabel(t, statusText)}</td>
+        <td class="num${slow ? " text-warn" : ""}">${l ? `${l.latencyMs} ms` : "—"}</td>
+        <td class="num">${u24}</td>
+        <td class="num hide-sm">${u7d}</td>
+        <td class="trend hide-sm">${sparkline(series, { t: sparkTone, lo: 0, hi: 120 })}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const nodes = (ov.nodes || [])
+    .filter((n) => n.nodeId !== "vps")
+    .map((n) => {
+      const t = n.stale ? "warn" : tone(n.status);
+      return `<div class="ext-probe">
+        <strong>External probe: ${esc(n.nodeId)}</strong>
+        ${stateLabel(t, n.stale ? "Stale" : n.status)}
+        <span class="muted">heartbeat ${fmtAgeMin(n.ageMinutes)}</span>
+        ${n.summary ? `<span class="mono muted">${esc(n.summary)}</span>` : ""}
       </div>`;
     })
     .join("");
 
-  const externalNodes = (ov.nodes || []).filter((n) => n.nodeId !== "vps");
-  const nodesHtml = externalNodes
-    .map(
-      (n) => `<div class="subcard">
-        <div class="row-between">
-          <strong>Node: ${esc(n.nodeId)}</strong>
-          <span class="badge ${badgeClass(n.status)}">${esc(n.status)}${n.stale ? " · STALE" : ""}</span>
-        </div>
-        <div class="row-between muted mono mt-6">
-          <span>Heartbeat</span>
-          <span>${n.ageMinutes}m ago</span>
-        </div>
-        ${n.summary ? `<div class="muted mono mt-6">${esc(n.summary)}</div>` : ""}
-      </div>`,
-    )
-    .join("");
-
-  document.getElementById("probes-grid").innerHTML = html + nodesHtml;
+  document.getElementById("endpoints-content").innerHTML = `<table class="table">
+      <thead><tr>
+        <th>Endpoint</th><th>Status</th><th class="num">Latency</th><th class="num">24h</th>
+        <th class="num hide-sm">7d</th><th class="trend hide-sm">Latency, last 4h</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>${nodes}`;
 }
 
 function renderVps(ov, hist) {
-  const vps = ov.vps;
-  const ageEl = document.getElementById("vps-age");
-  const container = document.getElementById("vps-content");
-  if (!vps) {
-    ageEl.textContent = "No snapshots yet";
-    container.innerHTML = `<p class="muted">Waiting for first 15-minute telemetry push from <code>vps-watchdog.sh</code>.</p>`;
+  const v = ov.vps;
+  const note = document.getElementById("vps-note");
+  const el = document.getElementById("vps-content");
+  if (!v) {
+    note.textContent = "No reports yet";
+    el.innerHTML = `<p class="muted">Waiting for the first push from <code>vps-watchdog.sh</code> (every 15 min).</p>`;
     return;
   }
+  note.textContent = `ubuntu-8gb-fsn1-1 · ${v.stale ? "stale, " : ""}${fmtAgeMin(v.ageMinutes)}`;
 
-  ageEl.textContent = `${vps.status} · ${vps.ageMinutes}m ago${vps.stale ? " (STALE)" : ""}`;
-  const containersHtml = (vps.containers || [])
+  const diskT =
+    v.diskPct == null ? "muted" : v.diskPct >= THRESHOLDS.diskFail ? "fail" : v.diskPct >= THRESHOLDS.diskWarn ? "warn" : "ok";
+  const memUsedPct =
+    v.memAvailMb != null && v.memTotalMb
+      ? Math.round(((v.memTotalMb - v.memAvailMb) / v.memTotalMb) * 100)
+      : 0;
+  const memT = v.memAvailMb == null ? "muted" : v.memAvailMb < THRESHOLDS.memAvailWarnMb ? "warn" : "ok";
+
+  const portsList = v.ports || [];
+  const openPorts = portsList.filter((p) => p.open).length;
+  const mem = (hist?.vpsSeries || [])
+    .map((x) => x.memAvailMb)
+    .filter((n) => typeof n === "number" && Number.isFinite(n));
+
+  const containers = (v.containers || [])
     .map(
-      (c) => `<span class="badge ${c.healthy ? "badge-ok" : "badge-fail"}" title="${esc(c.status)}">${esc(c.name)}</span>`,
+      (c) => `<div class="row"><span class="k mono">${esc(c.name)}</span>${stateLabel(c.healthy ? "ok" : "fail", c.healthy ? "Healthy" : c.status)}</div>`,
     )
     .join("");
-
-  const jibeBadge =
-    vps.jibeTotal != null
-      ? `<span class="badge badge-info">jibe dev: ${vps.jibeRunning ?? 0}/${vps.jibeTotal} running</span>`
+  const jibe =
+    v.jibeTotal != null
+      ? `<div class="row"><span class="k mono">jibe-* (work)</span><span class="muted">${v.jibeRunning ?? 0}/${v.jibeTotal} running</span></div>`
       : "";
+  const containerBlock =
+    containers || jibe ? `<div class="list-2">${containers}${jibe}</div>` : `<p class="muted">No container status reported.</p>`;
 
-  const portsHtml = (vps.ports || [])
-    .map((p) => `<span class="badge ${p.open ? "badge-ok" : "badge-fail"}">:${p.port} ${esc(p.label)}</span>`)
-    .join("");
+  const portsBlock = portsList.length
+    ? `<div class="row ports-row">
+        ${stateLabel(openPorts === portsList.length ? "ok" : "fail", `${openPorts}/${portsList.length} ports open`)}
+        <span class="ports mono">${portsList.map((p) => `<span class="${p.open ? "" : "text-fail"}">${p.port}&nbsp;${esc(p.label)}</span>`).join(" ")}</span>
+      </div>`
+    : `<p class="muted">No tunnel ports reported.</p>`;
 
-  const memSeries = (hist?.vpsSeries || []).map((x) => x.memAvailMb);
+  const memLabel =
+    v.memAvailMb != null && v.memTotalMb
+      ? `${v.memAvailMb.toLocaleString()} of ${v.memTotalMb.toLocaleString()} MiB free`
+      : v.memAvailMb != null
+        ? `${v.memAvailMb.toLocaleString()} MiB free`
+        : "—";
 
-  container.innerHTML = `
-    <div class="kv-grid">
-      <div class="kv"><div class="kv-k">Status</div><div class="kv-v"><span class="badge ${badgeClass(vps.status)}">${esc(
-        vps.status,
-      )}</span></div></div>
-      <div class="kv"><div class="kv-k">Root Disk</div><div class="kv-v">${vps.diskPct ?? "—"}%</div></div>
-      <div class="kv"><div class="kv-k">Mem Available</div><div class="kv-v">${vps.memAvailMb ?? "—"} / ${
-        vps.memTotalMb ?? "—"
-      } MiB</div></div>
-      <div class="kv"><div class="kv-k">Swap Used</div><div class="kv-v">${vps.swapUsedPct ?? "—"}% (${
-        vps.swapUsedMb ?? "—"
-      } MiB)</div></div>
+  const memRangeLabel = mem.length ? `${Math.min(...mem).toLocaleString()}–${Math.max(...mem).toLocaleString()} MiB` : "—";
+  const memTotalHint = v.memTotalMb ? ` (of ${v.memTotalMb.toLocaleString()} MiB)` : "";
+
+  el.innerHTML = `
+    <div class="meter-row">
+      <div class="row"><span class="k">Root disk</span><span class="${diskT === "ok" || diskT === "muted" ? "" : `text-${diskT}`}">${v.diskPct != null ? `${v.diskPct}% used` : "—"}</span></div>
+      ${meter(v.diskPct ?? 0, diskT)}
     </div>
-    <div class="muted">Containers</div>
-    <div class="chips">${containersHtml}${jibeBadge}</div>
-    ${portsHtml ? `<div class="muted">Seedbox Tunnels</div><div class="chips">${portsHtml}</div>` : ""}
-    <div class="muted">Available RAM (${esc(state.range)})</div>
-    ${renderSparkline(memSeries, "#38bdf8")}
-    ${
-      vps.summary
-        ? `<details><summary>Raw watchdog summary (${fmtTime(vps.createdAt)})</summary><pre>${esc(vps.summary)}</pre></details>`
-        : ""
-    }
+    <div class="meter-row">
+      <div class="row"><span class="k">Memory</span><span class="${memT === "ok" || memT === "muted" ? "" : `text-${memT}`}">${memLabel}</span></div>
+      ${meter(memUsedPct, memT)}
+    </div>
+    <div class="row"><span class="k">Swap</span><span>${v.swapUsedMb ?? 0} MiB <span class="meta">${v.swapUsedPct ?? 0}%</span></span></div>
+
+    <div class="subhead">Containers</div>
+    ${containerBlock}
+
+    <div class="subhead">Seedbox tunnel</div>
+    ${portsBlock}
+
+    <div class="chart-head"><span>Available memory, ${esc(state.range)}${memTotalHint}</span><span>${memRangeLabel}</span></div>
+    ${sparkline(mem, { large: true, area: true, t: memT, lo: 0, hi: v.memTotalMb || undefined })}
+
+    ${v.summary ? `<details><summary>Raw watchdog summary · ${fmtTime(v.createdAt)}</summary><pre>${esc(v.summary)}</pre></details>` : ""}
   `;
 }
 
-function renderBackupsAndHc(ov) {
-  const vps = ov.vps;
+function renderBackups(ov) {
+  const v = ov.vps;
   const hc = ov.healthchecks;
-  document.getElementById("hc-age").textContent = hc?.updatedAt ? `Synced ${fmtTime(hc.updatedAt)}` : "Not synced yet";
+  const now = nowSec();
+  document.getElementById("hc-note").textContent = hc?.updatedAt
+    ? `Synced ${fmtAgeMin(Math.max(0, (now - hc.updatedAt) / 60))}`
+    : "Not synced yet";
 
-  const agesHtml = vps
-    ? `<div class="kv-grid">
-        <div class="kv"><div class="kv-k">Restic Backup Age</div><div class="kv-v">${vps.resticAgeH ?? "—"}h</div></div>
-        <div class="kv"><div class="kv-k">Muuvies Tar Age</div><div class="kv-v">${vps.muuviesAgeH ?? "—"}h</div></div>
-        <div class="kv"><div class="kv-k">Seedbox Sync Age</div><div class="kv-v">${vps.seedboxSyncAgeH ?? "—"}h</div></div>
-      </div>`
-    : "";
+  const age = (label, h, limit) => {
+    if (h == null) return `<div class="row"><span class="k">${label}</span><span class="muted">—</span></div>`;
+    const t = h > limit ? "warn" : "ok";
+    return `<div class="row"><span class="k">${label}</span><span class="${t === "ok" ? "" : "text-warn"}">${fmtAgeMin(h * 60)}<span class="meta">limit ${limit}h</span></span></div>`;
+  };
+  const ages =
+    age("Restic offsite", v?.resticAgeH ?? null, THRESHOLDS.resticWarnH) +
+    age("Muuvies tar", v?.muuviesAgeH ?? null, THRESHOLDS.tarWarnH) +
+    age("Seedbox sync", v?.seedboxSyncAgeH ?? null, THRESHOLDS.seedboxWarnH);
 
-  const checks = hc?.checks || [];
-  const checksHtml = checks.length
-    ? `<div class="list">${checks
-        .map(
-          (c) => `<div class="list-item row-between">
-            <div>
-              <strong class="mono">${esc(c.name)}</strong>
-              <div class="muted">Last ping: ${esc(fmtRelIso(c.lastPing))} · ${c.nPings} pings</div>
-            </div>
-            <span class="badge ${badgeClass(c.status)}">${esc(c.status.toUpperCase())}</span>
-          </div>`,
-        )
-        .join("")}</div>`
-    : `<p class="muted">No Healthchecks checks cached yet.</p>`;
+  const checks = (hc?.checks || [])
+    .map((c) => {
+      const t = tone(c.status);
+      const rawStatus = String(c.status || "unknown");
+      const statusText = rawStatus === "up" ? "Up" : rawStatus[0].toUpperCase() + rawStatus.slice(1);
+      return `<div class="row">
+        <span class="k mono">${esc(c.name)}</span>
+        <span><span class="${t === "ok" ? "muted" : `text-${t}`}">${esc(fmtRelIso(c.lastPing))}</span>
+        <span class="meta">${stateLabel(t, statusText)}</span></span>
+      </div>`;
+    })
+    .join("");
 
-  document.getElementById("backups-content").innerHTML = agesHtml + checksHtml;
+  document.getElementById("backups-content").innerHTML = `
+    <div class="rows">${ages}</div>
+    <div class="subhead">Healthchecks.io</div>
+    <div class="rows">${checks || `<p class="muted">No Healthchecks checks cached yet.</p>`}</div>`;
 }
 
-function renderAnalytics(ov) {
-  const days = ov.cfAnalytics?.days || [];
-  document.getElementById("cf-age").textContent = ov.cfAnalytics?.updatedAt
-    ? `Updated ${fmtTime(ov.cfAnalytics.updatedAt)}`
-    : "malex.tech (7d)";
-
+function renderTraffic(ov) {
+  const days = (ov.cfAnalytics?.days || []).slice(-7);
+  document.getElementById("cf-note").textContent = "malex.tech, last 7 days";
+  const el = document.getElementById("traffic-content");
   if (!days.length) {
-    document.getElementById("analytics-content").innerHTML = `<p class="muted">Analytics cache populates on next cron sync (needs <code>CF_ANALYTICS_TOKEN</code>).</p>`;
+    el.innerHTML = `<p class="muted">Analytics cache populates on the next cron sync (needs <code>CF_ANALYTICS_TOKEN</code>).</p>`;
     return;
   }
 
-  const reqs = days.reduce((a, d) => a + d.requests, 0);
-  const cached = days.reduce((a, d) => a + d.cachedRequests, 0);
-  const bytes = days.reduce((a, d) => a + d.bytes, 0);
-  const threats = days.reduce((a, d) => a + d.threats, 0);
-  const pct = reqs > 0 ? ((cached / reqs) * 100).toFixed(1) : "0.0";
+  const sum = (k) => days.reduce((a, d) => a + (d[k] || 0), 0);
+  const reqs = sum("requests");
+  const cached = sum("cachedRequests");
+  const cachedPct = reqs > 0 ? ((cached / reqs) * 100).toFixed(1) : "0.0";
+  const max = Math.max(1, ...days.map((d) => d.requests || 0));
+  const W = 700;
+  const H = 96;
+  const slot = W / 7;
+  const bw = slot * 0.56;
 
-  document.getElementById("analytics-content").innerHTML = `
-    <div class="kv-grid">
-      <div class="kv"><div class="kv-k">7d Requests</div><div class="kv-v">${reqs.toLocaleString()}</div></div>
-      <div class="kv"><div class="kv-k">Cache Hit</div><div class="kv-v">${pct}%</div></div>
-      <div class="kv"><div class="kv-k">Bandwidth</div><div class="kv-v">${fmtBytes(bytes)}</div></div>
-      <div class="kv"><div class="kv-k">Threats</div><div class="kv-v">${threats.toLocaleString()}</div></div>
+  const bars = days
+    .map((d, i) => {
+      const x = (i * slot + (slot - bw) / 2).toFixed(1);
+      const th = ((d.requests || 0) / max) * (H - 4);
+      const ch = ((d.cachedRequests || 0) / max) * (H - 4);
+      return `<rect class="total" x="${x}" y="${(H - th).toFixed(1)}" width="${bw.toFixed(1)}" height="${th.toFixed(1)}" rx="2" />
+        <rect class="cached" x="${x}" y="${(H - ch).toFixed(1)}" width="${bw.toFixed(1)}" height="${ch.toFixed(1)}" rx="2" />`;
+    })
+    .join("");
+
+  const labels = days
+    .map((d) => `<span>${esc(new Date(`${d.date}T12:00:00`).toLocaleDateString([], { weekday: "short" }))}</span>`)
+    .join("");
+
+  el.innerHTML = `
+    <div class="stats">
+      <div><div class="stat-k">Requests</div><div class="stat-v">${reqs.toLocaleString()}</div></div>
+      <div><div class="stat-k">Cached</div><div class="stat-v">${cachedPct}%</div></div>
+      <div><div class="stat-k">Bandwidth</div><div class="stat-v">${fmtBytes(sum("bytes"))}</div></div>
+      <div><div class="stat-k">Threats</div><div class="stat-v">${sum("threats").toLocaleString()}</div></div>
     </div>
-    <div class="muted">Daily requests (${esc(days[0].date)} → ${esc(days[days.length - 1].date)})</div>
-    ${renderSparkline(days.map((d) => d.requests), "#a78bfa")}
-  `;
+    <div class="chart-head"><span>Requests per day</span>
+      <span class="legend"><span><span class="swatch cached"></span>Cached</span><span><span class="swatch total"></span>Uncached</span></span>
+    </div>
+    <svg class="bars" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Daily requests, last 7 days">${bars}</svg>
+    <div class="bar-labels">${labels}</div>`;
 }
 
 function renderIncidents(ov) {
   const list = ov.incidents || [];
+  const open = list.filter((i) => i.status === "open").length;
+  document.getElementById("inc-note").textContent = open ? `${open} open` : "None open";
+  const el = document.getElementById("incidents-content");
   if (!list.length) {
-    document.getElementById("incidents-content").innerHTML = `<p class="muted">No incidents recorded.</p>`;
+    el.innerHTML = `<p class="muted">No incidents recorded.</p>`;
     return;
   }
-  document.getElementById("incidents-content").innerHTML = `<div class="list">${list
-    .slice(0, 10)
-    .map(
-      (i) => `<div class="list-item">
-        <div class="row-between">
-          <strong>${esc(i.title)}</strong>
-          <span class="badge ${badgeClass(i.status === "open" ? i.severity : "resolved")}">${esc(
-            i.status.toUpperCase(),
-          )}</span>
+  const now = nowSec();
+  el.innerHTML = list
+    .slice(0, 6)
+    .map((i) => {
+      const isOpen = i.status === "open";
+      const t = isOpen ? tone(i.severity) : "muted";
+      const lasted = i.resolved_at
+        ? `lasted ${fmtDuration(i.resolved_at - i.opened_at)}`
+        : `open for ${fmtDuration(Math.max(0, now - i.opened_at))}`;
+      return `<div class="incident">
+        <div class="incident-top">
+          <span class="incident-title">${esc(i.title)}</span>
+          ${isOpen ? stateLabel(t, "Open") : `<span class="muted">Resolved</span>`}
         </div>
-        <div class="muted mono mt-4">
-          ${esc(i.source)} · opened ${fmtTime(i.opened_at)}${i.resolved_at ? ` · resolved ${fmtTime(i.resolved_at)}` : ""}
-        </div>
-        ${i.detail ? `<div class="muted mt-4">${esc(i.detail)}</div>` : ""}
-      </div>`,
-    )
-    .join("")}</div>`;
+        <div class="incident-meta"><span class="mono">${esc(i.source)}</span> · ${fmtTime(i.opened_at)} · ${lasted}</div>
+        ${i.detail ? `<div class="incident-detail">${esc(i.detail)}</div>` : ""}
+      </div>`;
+    })
+    .join("");
 }
 
 function renderAll() {
   const ov = state.overview;
   if (!ov) return;
-  const dot = document.getElementById("overall-dot");
-  dot.className = `dot dot-${ov.overallStatus === "OK" ? "ok" : ov.overallStatus === "WARN" ? "warn" : "fail"}`;
-  document.getElementById("user-email").textContent = ov.userEmail || "Access verified";
-  document.getElementById("last-updated").textContent = `Updated ${fmtTime(ov.generatedAt)}`;
-
-  renderSummary(ov);
-  renderProbes(ov);
+  const issues = collectIssues(ov);
+  renderStatus(ov, issues);
+  renderEndpoints(ov);
   renderVps(ov, state.history);
-  renderBackupsAndHc(ov);
-  renderAnalytics(ov);
+  renderBackups(ov);
+  renderTraffic(ov);
   renderIncidents(ov);
 }
+
+/* ---------------- errors & fetching ---------------- */
 
 function showError(message) {
   const banner = document.getElementById("error-banner");
   if (banner) {
     banner.textContent = message;
-    banner.classList.remove("hidden");
+    banner.hidden = false;
   }
   const updated = document.getElementById("last-updated");
   if (updated) {
-    updated.textContent = "Sync error";
+    updated.textContent = "sync error";
+  }
+  if (!state.overview) {
+    const title = document.getElementById("status-title");
+    title.className = "fail";
+    title.textContent = "Unable to load telemetry";
+    document.getElementById("overall-dot").className = "dot fail";
   }
 }
 
@@ -347,7 +547,7 @@ function clearError() {
   const banner = document.getElementById("error-banner");
   if (banner) {
     banner.textContent = "";
-    banner.classList.add("hidden");
+    banner.hidden = true;
   }
 }
 
@@ -384,6 +584,7 @@ async function loadDashboard() {
     throw new Error(await readErrorMessage(ovRes, "Overview"));
   }
   state.overview = await ovRes.json();
+  state.updatedAt = nowSec();
   if (!histRes.ok) {
     renderAll();
     throw new Error(await readErrorMessage(histRes, "History"));
@@ -400,49 +601,64 @@ async function triggerManualProbe() {
   try {
     const res = await fetch("/api/cron/run", { method: "POST" });
     if (!res.ok) {
-      showError(await readErrorMessage(res, "Run Probe"));
+      showError(await readErrorMessage(res, "Run probe"));
       return;
     }
     state.overview = await res.json();
+    state.updatedAt = nowSec();
     state.history = await fetchHistory(state.range);
     clearError();
     renderAll();
   } catch (err) {
-    showError(err instanceof Error ? `Run Probe: ${err.message}` : "Run Probe failed");
+    showError(err instanceof Error ? `Run probe: ${err.message}` : "Run probe failed");
   } finally {
     btn.disabled = false;
-    btn.textContent = "Run Probe";
+    btn.textContent = "Run probe";
   }
 }
 
+/* ---------------- wiring ---------------- */
+
 document.getElementById("run-probe-btn").addEventListener("click", triggerManualProbe);
+
 for (const btn of document.querySelectorAll(".seg-btn")) {
   btn.addEventListener("click", async () => {
     const prevRange = state.range;
     state.range = btn.dataset.range;
     for (const b of document.querySelectorAll(".seg-btn")) {
       b.classList.toggle("active", b === btn);
+      b.setAttribute("aria-pressed", String(b === btn));
     }
     try {
       state.history = await fetchHistory(state.range);
       clearError();
-      renderAll();
+      if (state.overview) {
+        renderVps(state.overview, state.history);
+      }
     } catch (err) {
       state.range = prevRange;
       for (const b of document.querySelectorAll(".seg-btn")) {
         b.classList.toggle("active", b.dataset.range === prevRange);
+        b.setAttribute("aria-pressed", String(b.dataset.range === prevRange));
       }
       showError(err instanceof Error ? err.message : "Failed to load history");
     }
   });
 }
 
+document.getElementById("theme-btn").addEventListener("click", () => {
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  document.documentElement.classList.toggle("dark", next === "dark");
+  try { localStorage.setItem("theme", next); } catch {}
+});
+
 loadDashboard().catch((err) => {
   showError(err instanceof Error ? err.message : "Failed to load dashboard");
 });
+
 setInterval(() => {
   loadDashboard().catch((err) => {
     showError(err instanceof Error ? err.message : "Refresh failed");
   });
-}, 60000);
-
+}, 60_000);
