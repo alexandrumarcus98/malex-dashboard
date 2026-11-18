@@ -115,18 +115,23 @@ function meter(pct, t) {
   return `<div class="meter"><span class="meter-fill ${widthClass(pct)}${cls}"></span></div>`;
 }
 
-/** lo/hi fix the y-axis so normal jitter stays flat and real changes stand out. */
+/**
+ * lo/hi fix the y-axis so normal jitter stays flat and real changes stand out.
+ * Values outside [lo, hi] are pinned to the edge, so one spike can't rescale the
+ * whole line (the row's status and tone already call out a slow endpoint).
+ */
 function sparkline(values, { large = false, t = "", area = false, lo, hi } = {}) {
   const nums = (values || []).filter((v) => typeof v === "number" && Number.isFinite(v));
   if (nums.length < 2) return `<div class="muted">Collecting samples…</div>`;
   const w = 300;
   const h = large ? 64 : 28;
   const min = lo ?? Math.min(...nums);
-  const max = Math.max(hi ?? -Infinity, ...nums);
+  const max = hi ?? Math.max(...nums);
   const span = max - min || 1;
+  const clamp = (v) => Math.min(max, Math.max(min, v));
   const pts = nums.map((v, i) => [
     ((i / (nums.length - 1)) * w).toFixed(1),
-    (h - 3 - ((v - min) / span) * (h - 6)).toFixed(1),
+    (h - 3 - ((clamp(v) - min) / span) * (h - 6)).toFixed(1),
   ]);
   const line = pts.map((p) => p.join(",")).join(" ");
   const areaPath = area ? `<polygon class="area" points="0,${h} ${line} ${w},${h}" />` : "";
@@ -136,13 +141,23 @@ function sparkline(values, { large = false, t = "", area = false, lo, hi } = {})
 
 /* ---------------- derived checks ---------------- */
 
-/** Everything that is not OK, most severe first. Drives the title and the attention box. */
+const RANK = { fail: 0, warn: 1, muted: 2, ok: 3 };
+const worse = (a, b) => ((RANK[a] ?? 2) <= (RANK[b] ?? 2) ? a : b);
+
+/**
+ * Everything that is not OK, most severe first. Drives the title and the attention box.
+ * Client-side checks give the specific reasons; open incidents and the server's
+ * overallStatus are folded in so the headline can never read better than the backend.
+ */
 function collectIssues(ov) {
   const out = [];
+  // Incident sources (see src/ingest.ts, cron.ts, probes.ts) already explained by an issue above.
+  const covered = new Set();
   for (const p of ov.probes || []) {
     if (!p.latest) continue;
     const name = probeName(p);
     if (!p.latest.ok) {
+      covered.add(`probe:${p.id}`);
       out.push({
         t: "fail",
         text: `${name} is down (${p.latest.statusCode || p.latest.error || "unreachable"})`,
@@ -155,8 +170,10 @@ function collectIssues(ov) {
 
   for (const n of (ov.nodes || []).filter((x) => x.nodeId !== "vps")) {
     if (n.stale || (n.ageMinutes != null && n.ageMinutes > THRESHOLDS.staleMin)) {
+      covered.add(`${n.nodeId}:heartbeat`);
       out.push({ t: "warn", text: `${n.nodeId} heartbeat is ${n.ageMinutes}m old`, href: "#endpoints" });
     } else if (tone(n.status) !== "ok") {
+      covered.add(`watchdog:${n.nodeId}`);
       out.push({ t: tone(n.status), text: `${n.nodeId} reports ${n.status}`, href: "#endpoints" });
     }
   }
@@ -168,10 +185,10 @@ function collectIssues(ov) {
   if (!v) {
     out.push({ t: "warn", text: "No VPS telemetry received yet", href: "#vps" });
   } else {
-    let vpsSpecificIssue = false;
+    const vpsStart = out.length;
     if (v.stale || (v.ageMinutes != null && v.ageMinutes > THRESHOLDS.staleMin)) {
+      covered.add(`${v.nodeId || "vps"}:heartbeat`);
       out.push({ t: "warn", text: `VPS last reported ${v.ageMinutes}m ago`, href: "#vps" });
-      vpsSpecificIssue = true;
     }
     if (v.diskPct != null && v.diskPct >= THRESHOLDS.diskWarn) {
       out.push({
@@ -179,49 +196,66 @@ function collectIssues(ov) {
         text: `VPS root disk at ${v.diskPct}%`,
         href: "#vps",
       });
-      vpsSpecificIssue = true;
     }
     if (v.memAvailMb != null && v.memAvailMb < THRESHOLDS.memAvailWarnMb) {
       out.push({ t: "warn", text: `VPS memory low: ${v.memAvailMb} MiB free`, href: "#vps" });
-      vpsSpecificIssue = true;
     }
     for (const c of v.containers || []) {
       if (!c.healthy) {
         out.push({ t: "fail", text: `Container ${c.name}: ${c.status}`, href: "#vps" });
-        vpsSpecificIssue = true;
       }
     }
     for (const p of v.ports || []) {
       if (!p.open) {
         out.push({ t: "fail", text: `Tunnel port ${p.port} (${p.label}) closed`, href: "#vps" });
-        vpsSpecificIssue = true;
       }
     }
     if (v.resticAgeH != null && v.resticAgeH > THRESHOLDS.resticWarnH && !hcWarned(/restic/i)) {
       out.push({ t: "warn", text: `Restic offsite backup is ${fmtAgeMin(v.resticAgeH * 60)}`, href: "#backups" });
-      vpsSpecificIssue = true;
     }
     if (v.muuviesAgeH != null && v.muuviesAgeH > THRESHOLDS.tarWarnH && !hcWarned(/muuvies/i)) {
       out.push({ t: "warn", text: `Muuvies tar backup is ${fmtAgeMin(v.muuviesAgeH * 60)}`, href: "#backups" });
-      vpsSpecificIssue = true;
     }
     if (v.seedboxSyncAgeH != null && v.seedboxSyncAgeH > THRESHOLDS.seedboxWarnH && !hcWarned(/seedbox/i)) {
       out.push({ t: "warn", text: `Seedbox sync is ${fmtAgeMin(v.seedboxSyncAgeH * 60)}`, href: "#backups" });
-      vpsSpecificIssue = true;
     }
-    if (!vpsSpecificIssue && tone(v.status) !== "ok") {
-      out.push({ t: tone(v.status), text: `VPS reports ${v.status}`, href: "#vps" });
+    // The specific checks above explain a WARN, but they must never hide a FAIL:
+    // only skip the generic line when they are at least as severe as the watchdog.
+    const vpsTone = tone(v.status);
+    const specificWorst = out.slice(vpsStart).reduce((acc, i) => worse(acc, i.t), "ok");
+    if (vpsTone !== "ok") {
+      covered.add(`watchdog:${v.nodeId || "vps"}`);
+      if (worse(specificWorst, vpsTone) !== specificWorst) {
+        out.push({ t: vpsTone, text: `VPS watchdog reports ${v.status}`, href: "#vps" });
+      }
     }
   }
 
   for (const c of hcChecks) {
+    if (tone(c.status) === "fail") covered.add("healthchecks:down");
     if (tone(c.status) !== "ok") {
       out.push({ t: tone(c.status), text: `${c.name} is late: last ping ${fmtRelIso(c.lastPing)}`, href: "#backups" });
     }
   }
 
-  const rank = { fail: 0, warn: 1, muted: 2 };
-  return out.sort((a, b) => (rank[a.t] ?? 2) - (rank[b.t] ?? 2));
+  // Open incidents the checks above didn't already explain, so the attention list
+  // and the "N open incidents" fact can't disagree.
+  for (const i of ov.incidents || []) {
+    if (i.status !== "open" || covered.has(i.source)) continue;
+    covered.add(i.source);
+    out.push({ t: tone(i.severity) === "fail" ? "fail" : "warn", text: i.title, href: "#incidents" });
+  }
+
+  // Last line of defence: the headline may never read better than the server's verdict.
+  const serverTone = tone(ov.overallStatus);
+  if (serverTone === "fail" || serverTone === "warn") {
+    const worst = out.reduce((acc, i) => worse(acc, i.t), "ok");
+    if (worse(worst, serverTone) !== worst) {
+      out.push({ t: serverTone, text: `Server reports overall ${ov.overallStatus}`, href: "#incidents" });
+    }
+  }
+
+  return out.sort((a, b) => (RANK[a.t] ?? 2) - (RANK[b.t] ?? 2));
 }
 
 /* ---------------- renderers ---------------- */
@@ -310,10 +344,20 @@ function renderEndpoints(ov) {
     })
     .join("");
 
+  // recentSeries is the last N samples, not a fixed window, so label it from the data.
+  const seriesSpan = Math.max(
+    0,
+    ...probes.map((p) => {
+      const s = p.recentSeries || [];
+      return s.length > 1 ? s[s.length - 1].t - s[0].t : 0;
+    }),
+  );
+  const trendLabel = seriesSpan >= 60 ? `Latency, last ${fmtDuration(seriesSpan)}` : "Recent latency";
+
   document.getElementById("endpoints-content").innerHTML = `<table class="table">
       <thead><tr>
         <th>Endpoint</th><th>Status</th><th class="num">Latency</th><th class="num">24h</th>
-        <th class="num hide-sm">7d</th><th class="trend hide-sm">Latency, last 4h</th>
+        <th class="num hide-sm">7d</th><th class="trend hide-sm">${esc(trendLabel)}</th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>${nodes}`;
