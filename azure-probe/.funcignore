@@ -1,0 +1,10 @@
+.git*
+.gitignore
+.funcignore
+.vscode
+local.settings.json
+dist/
+test
+*.d.ts
+*.log
+*.zip

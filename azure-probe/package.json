@@ -1,0 +1,11 @@
+{
+  "name": "edge-ops-azure-probe",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "main": "src/functions/*.js",
+  "dependencies": {
+    "@azure/functions": "^4.6.0"
+  }
+}
+
