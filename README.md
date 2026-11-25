@@ -1,8 +1,20 @@
 # Edge Ops Dashboard
 
+[![CI](https://github.com/alexandrumarcus98/malex-dashboard/actions/workflows/ci.yml/badge.svg)](https://github.com/alexandrumarcus98/malex-dashboard/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Serverless operations & monitoring console running on **Cloudflare Workers + Static Assets + D1 + Cron Triggers**, gated by **Cloudflare Zero Trust Access** (`$0/month`, zero steady-state host RAM overhead).
 
 ## Architecture
+
+```mermaid
+flowchart LR
+  User["Operator Browser"] -->|"Access User JWT"| Worker["Cloudflare Worker + Assets"]
+  Host["Host Watchdog / Azure Probe"] -->|"Access Service Token + Bearer"| Worker
+  Cron["Cron Trigger (*/5m)"] --> Worker
+  Worker --> D1["Cloudflare D1 (SQLite)"]
+  Worker -->|"Probes & Read-only Sync"| Ext["Target URLs / Healthchecks.io / CF GraphQL"]
+```
 
 - **Frontend (`public/`):** Single-page operations UI served via Worker Assets.
 - **Worker (`src/`):**
@@ -20,8 +32,10 @@ Serverless operations & monitoring console running on **Cloudflare Workers + Sta
 
 ```bash
 pnpm install
-pnpm test
 pnpm typecheck
-pnpm db:migrate:remote
+pnpm test
+pnpm db:migrate:local   # apply D1 migrations locally
+pnpm dev                # run local Wrangler dev server
+pnpm db:migrate:remote  # apply D1 migrations to remote D1
 pnpm deploy
 ```
