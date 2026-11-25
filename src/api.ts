@@ -1,0 +1,432 @@
+import { invalidateCaches, readCache, writeCache } from "./external";
+import { getProbeTargets } from "./probes";
+import {
+  NODE_STALE_SEC,
+  type BackupLabels,
+  type CfDayPoint,
+  type DashboardLink,
+  type Env,
+  type HealthcheckItem,
+  type IncidentRow,
+} from "./types";
+
+const PROBE_STATS_CACHE_TTL_SEC = 300;
+const OVERVIEW_CACHE_KEY = "overview_snapshot";
+const OVERVIEW_CACHE_TTL_SEC = 60;
+const HISTORY_7D_CACHE_KEY = "history_7d_probes0";
+const HISTORY_7D_CACHE_TTL_SEC = 120;
+
+const DEFAULT_LINKS: DashboardLink[] = [
+  { label: "Healthchecks", url: "https://healthchecks.io/projects/" },
+  { label: "Cloudflare", url: "https://dash.cloudflare.com" },
+];
+
+const DEFAULT_BACKUP_LABELS: BackupLabels = {
+  primary: "Off-site backup",
+  app: "App snapshot",
+  sync: "Remote sync",
+};
+
+function parseDashboardLinks(rawJson?: string): DashboardLink[] {
+  if (!rawJson || !rawJson.trim()) {
+    return DEFAULT_LINKS;
+  }
+  try {
+    const parsed = JSON.parse(rawJson) as unknown;
+    if (!Array.isArray(parsed)) return DEFAULT_LINKS;
+    const links: DashboardLink[] = [];
+    for (const item of parsed.slice(0, 8)) {
+      if (!item || typeof item !== "object") continue;
+      const rec = item as Record<string, unknown>;
+      const label = typeof rec.label === "string" ? rec.label.trim().slice(0, 32) : "";
+      const url = typeof rec.url === "string" ? rec.url.trim() : "";
+      if (!label || !url) continue;
+      try {
+        const parsedUrl = new URL(url);
+        if (parsedUrl.protocol !== "https:" && parsedUrl.protocol !== "http:") continue;
+        links.push({ label, url: parsedUrl.toString() });
+      } catch {
+        continue;
+      }
+    }
+    return parsed.length === 0 ? [] : links.length > 0 ? links : DEFAULT_LINKS;
+  } catch {
+    return DEFAULT_LINKS;
+  }
+}
+
+function parseBackupLabels(rawJson?: string): BackupLabels {
+  if (!rawJson || !rawJson.trim()) {
+    return DEFAULT_BACKUP_LABELS;
+  }
+  try {
+    const parsed = JSON.parse(rawJson) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return DEFAULT_BACKUP_LABELS;
+    }
+    const rec = parsed as Record<string, unknown>;
+    return {
+      primary: typeof rec.primary === "string" && rec.primary.trim() ? rec.primary.trim().slice(0, 48) : DEFAULT_BACKUP_LABELS.primary,
+      app: typeof rec.app === "string" && rec.app.trim() ? rec.app.trim().slice(0, 48) : DEFAULT_BACKUP_LABELS.app,
+      sync: typeof rec.sync === "string" && rec.sync.trim() ? rec.sync.trim().slice(0, 48) : DEFAULT_BACKUP_LABELS.sync,
+    };
+  } catch {
+    return DEFAULT_BACKUP_LABELS;
+  }
+}
+
+export async function invalidateDashboardCaches(db: D1Database): Promise<void> {
+  await invalidateCaches(db, [OVERVIEW_CACHE_KEY, HISTORY_7D_CACHE_KEY]);
+}
+
+interface ProbeStatsRow {
+  target: string;
+  total_7d: number;
+  ok_7d: number;
+  total_24h: number;
+  ok_24h: number;
+  avg_ms_24h: number | null;
+}
+
+interface VpsSnapshotRow {
+  id: number;
+  node_id: string;
+  hostname: string | null;
+  status: string;
+  disk_pct: number | null;
+  mem_avail_mb: number | null;
+  mem_total_mb: number | null;
+  swap_used_pct: number | null;
+  swap_used_mb: number | null;
+  backup_primary_age_h: number | null;
+  backup_app_age_h: number | null;
+  backup_sync_age_h: number | null;
+  containers_json: string | null;
+  aux_running: number | null;
+  aux_total: number | null;
+  ports_json: string | null;
+  summary: string | null;
+  created_at: number;
+}
+
+interface ProbeRow {
+  target: string;
+  ok: number;
+  status_code: number;
+  latency_ms: number;
+  detail_json: string | null;
+  error: string | null;
+  checked_at: number;
+}
+
+function safeJsonParse<T>(raw: string | null, fallback: T): T {
+  if (!raw) {
+    return fallback;
+  }
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+/** Build the dashboard overview response used by the UI. */
+export async function getOverview(env: Env, userEmail: string, nowSec: number): Promise<Record<string, unknown>> {
+  const cachedOverview = await readCache<Record<string, unknown>>(env.DB, OVERVIEW_CACHE_KEY);
+  if (cachedOverview && nowSec >= cachedOverview.updatedAt && nowSec - cachedOverview.updatedAt < OVERVIEW_CACHE_TTL_SEC) {
+    return { ...cachedOverview.value, userEmail };
+  }
+
+  const since24h = nowSec - 86400;
+  const since7d = nowSec - 7 * 86400;
+
+  const primaryNodeId = (env.PRIMARY_NODE_ID || "vps").trim() || "vps";
+  const probeTargets = getProbeTargets(env.PROBE_TARGETS_JSON);
+
+  const [vpsRowsRes, probeStatsCache, recentProbesRes, incidentsRes, hcCache, cfCache] = await Promise.all([
+    env.DB.prepare(
+      `WITH RECURSIVE nodes(node_id) AS (
+         SELECT (SELECT node_id FROM vps_snapshots ORDER BY node_id ASC LIMIT 1)
+         UNION ALL
+         SELECT (SELECT node_id FROM vps_snapshots WHERE node_id > nodes.node_id ORDER BY node_id ASC LIMIT 1)
+         FROM nodes
+         WHERE nodes.node_id IS NOT NULL
+       )
+       SELECT v.*
+       FROM nodes n
+       JOIN vps_snapshots v ON v.id = (
+         SELECT s.id FROM vps_snapshots s
+         WHERE s.node_id = n.node_id
+         ORDER BY s.created_at DESC, s.id DESC
+         LIMIT 1
+       )
+       WHERE n.node_id IS NOT NULL
+       ORDER BY CASE WHEN v.node_id = ? THEN 0 ELSE 1 END, v.node_id ASC`,
+    )
+      .bind(primaryNodeId)
+      .all<VpsSnapshotRow>(),
+    readCache<ProbeStatsRow[]>(env.DB, "probe_stats_7d"),
+    env.DB.prepare(
+      `SELECT target, ok, status_code, latency_ms, detail_json, error, checked_at
+       FROM probe_samples
+       WHERE checked_at >= ?
+       ORDER BY checked_at DESC
+       LIMIT 150`,
+    )
+      .bind(since24h)
+      .all<ProbeRow>(),
+    env.DB.prepare("SELECT * FROM incidents ORDER BY CASE WHEN status = 'open' THEN 0 ELSE 1 END, opened_at DESC LIMIT 20").all<IncidentRow>(),
+    readCache<HealthcheckItem[]>(env.DB, "healthchecks"),
+    readCache<CfDayPoint[]>(env.DB, "cf_analytics"),
+  ]);
+
+  let probeStatsRows: ProbeStatsRow[];
+  if (probeStatsCache && nowSec - probeStatsCache.updatedAt < PROBE_STATS_CACHE_TTL_SEC) {
+    probeStatsRows = probeStatsCache.value;
+  } else {
+    const probeStatsRes = await env.DB.prepare(
+      `SELECT
+        target,
+        COUNT(*) AS total_7d,
+        SUM(ok) AS ok_7d,
+        SUM(CASE WHEN checked_at >= ? THEN 1 ELSE 0 END) AS total_24h,
+        SUM(CASE WHEN checked_at >= ? THEN ok ELSE 0 END) AS ok_24h,
+        ROUND(AVG(CASE WHEN checked_at >= ? THEN latency_ms ELSE NULL END)) AS avg_ms_24h
+       FROM probe_samples
+       WHERE checked_at >= ?
+       GROUP BY target`,
+    )
+      .bind(since24h, since24h, since24h, since7d)
+      .all<ProbeStatsRow>();
+    probeStatsRows = probeStatsRes.results;
+    await writeCache(env.DB, "probe_stats_7d", probeStatsRows, nowSec);
+  }
+
+  const statsMap = new Map(probeStatsRows.map((s) => [s.target, s]));
+  const probesByTarget = new Map<string, ProbeRow[]>();
+  for (const row of recentProbesRes.results) {
+    const list = probesByTarget.get(row.target) ?? [];
+    list.push(row);
+    probesByTarget.set(row.target, list);
+  }
+
+  const probes = probeTargets.map((target) => {
+    const samples = probesByTarget.get(target.id) ?? [];
+    const latest = samples[0] ?? null;
+    const stats = statsMap.get(target.id);
+    const uptime24h =
+      stats && stats.total_24h > 0 ? Number(((stats.ok_24h / stats.total_24h) * 100).toFixed(2)) : null;
+    const uptime7d =
+      stats && stats.total_7d > 0 ? Number(((stats.ok_7d / stats.total_7d) * 100).toFixed(2)) : null;
+
+    return {
+      id: target.id,
+      label: target.label,
+      url: target.url,
+      latest: latest
+        ? {
+            ok: latest.ok === 1,
+            statusCode: latest.status_code,
+            latencyMs: latest.latency_ms,
+            detail: safeJsonParse<Record<string, unknown> | null>(latest.detail_json, null),
+            error: latest.error,
+            checkedAt: latest.checked_at,
+          }
+        : null,
+      uptime24h,
+      uptime7d,
+      avgMs24h: stats?.avg_ms_24h ?? null,
+      recentSeries: samples
+        .slice(0, 36)
+        .reverse()
+        .map((s) => ({ t: s.checked_at, ms: s.latency_ms, ok: s.ok === 1 })),
+    };
+  });
+
+  const nodes = vpsRowsRes.results.map((r) => ({
+    nodeId: r.node_id,
+    hostname: r.hostname ?? null,
+    status: r.status,
+    stale: nowSec - r.created_at > NODE_STALE_SEC,
+    ageMinutes: Math.max(0, Math.round((nowSec - r.created_at) / 60)),
+    diskPct: r.disk_pct,
+    memAvailMb: r.mem_avail_mb,
+    memTotalMb: r.mem_total_mb,
+    swapUsedPct: r.swap_used_pct,
+    swapUsedMb: r.swap_used_mb,
+    backupPrimaryAgeH: r.backup_primary_age_h,
+    backupAppAgeH: r.backup_app_age_h,
+    backupSyncAgeH: r.backup_sync_age_h,
+    containers: safeJsonParse(r.containers_json, []),
+    auxRunning: r.aux_running,
+    auxTotal: r.aux_total,
+    ports: safeJsonParse(r.ports_json, []),
+    summary: r.summary,
+    createdAt: r.created_at,
+  }));
+
+  const vps = nodes.find((n) => n.nodeId === primaryNodeId) ?? nodes[0] ?? null;
+  const incidents = incidentsRes.results;
+  const openCritical = incidents.some((i) => i.status === "open" && i.severity === "critical");
+  const openWarn = incidents.some((i) => i.status === "open");
+  const anyNodeStale = nodes.some((n) => n.stale);
+  const overallStatus = openCritical ? "FAIL" : openWarn || anyNodeStale ? "WARN" : "OK";
+
+  const overviewPayload = {
+    generatedAt: nowSec,
+    userEmail,
+    overallStatus,
+    config: {
+      dashboardName: env.DASHBOARD_NAME?.trim() || "Edge Ops",
+      primaryNodeId,
+      auxContainersLabel: env.AUX_CONTAINERS_LABEL?.trim() || "Aux containers",
+      backupLabels: parseBackupLabels(env.BACKUP_LABELS_JSON),
+      links: parseDashboardLinks(env.DASHBOARD_LINKS_JSON),
+    },
+    vps,
+    nodes,
+    probes,
+    healthchecks: {
+      updatedAt: hcCache?.updatedAt ?? null,
+      checks: hcCache?.value ?? [],
+    },
+    cfAnalytics: {
+      updatedAt: cfCache?.updatedAt ?? null,
+      days: cfCache?.value ?? [],
+    },
+    incidents,
+  };
+  await writeCache(env.DB, OVERVIEW_CACHE_KEY, overviewPayload, nowSec);
+  return overviewPayload;
+}
+
+/** Return time-series points for primary host telemetry and (optionally) probe latency over 24h or 7d. */
+export async function getHistory(
+  db: D1Database,
+  range: "24h" | "7d",
+  nowSec: number,
+  includeProbes = true,
+  primaryNodeId = "vps",
+): Promise<Record<string, unknown>> {
+  if (range === "7d" && !includeProbes) {
+    const cachedHist = await readCache<Record<string, unknown>>(db, HISTORY_7D_CACHE_KEY);
+    if (cachedHist && nowSec >= cachedHist.updatedAt && nowSec - cachedHist.updatedAt < HISTORY_7D_CACHE_TTL_SEC) {
+      return cachedHist.value;
+    }
+  }
+  const windowSec = range === "7d" ? 7 * 86400 : 24 * 3600;
+  const since = nowSec - windowSec;
+  const probeLimit = range === "7d" ? 6500 : 1500;
+
+  const vpsQuery = db
+    .prepare(
+      `SELECT disk_pct, mem_avail_mb, mem_total_mb, swap_used_pct, created_at
+       FROM vps_snapshots
+       WHERE node_id = ? AND created_at >= ?
+       ORDER BY created_at DESC, id DESC
+       LIMIT 720`,
+    )
+    .bind(primaryNodeId, since)
+    .all<{
+      disk_pct: number | null;
+      mem_avail_mb: number | null;
+      mem_total_mb: number | null;
+      swap_used_pct: number | null;
+      created_at: number;
+    }>();
+
+  const probeQuery = includeProbes
+    ? db
+        .prepare(
+          `SELECT target, ok, latency_ms, checked_at
+           FROM probe_samples
+           WHERE checked_at >= ?
+           ORDER BY checked_at DESC, id DESC
+           LIMIT ?`,
+        )
+        .bind(since, probeLimit)
+        .all<{ target: string; ok: number; latency_ms: number; checked_at: number }>()
+    : Promise.resolve({ results: [] as Array<{ target: string; ok: number; latency_ms: number; checked_at: number }> });
+
+  const [vpsRes, probeRes] = await Promise.all([vpsQuery, probeQuery]);
+
+  const vpsRows = [...vpsRes.results].reverse();
+  const probeRows = [...probeRes.results].reverse();
+
+  const historyPayload = {
+    range,
+    since,
+    vpsSeries: vpsRows.map((r) => ({
+      t: r.created_at,
+      diskPct: r.disk_pct,
+      memAvailMb: r.mem_avail_mb,
+      memTotalMb: r.mem_total_mb,
+      swapUsedPct: r.swap_used_pct,
+    })),
+    probeSeries: probeRows.map((p) => ({
+      t: p.checked_at,
+      target: p.target,
+      ok: p.ok === 1,
+      ms: p.latency_ms,
+    })),
+  };
+  if (range === "7d" && !includeProbes) {
+    await writeCache(db, HISTORY_7D_CACHE_KEY, historyPayload, nowSec);
+  }
+  return historyPayload;
+}
+
+const ALLOWED_DB_TABLES = new Set(["probe_samples", "vps_snapshots", "incidents", "cache_kv"]);
+
+/** Return D1 table row counts and optionally recent rows for one allowlisted table. */
+export async function getDbTables(
+  db: D1Database,
+  tableName: string | null,
+  limit = 50,
+): Promise<{ tables: Array<{ name: string; count: number }>; selectedTable: string | null; rows: Array<Record<string, unknown>> }> {
+  const safeLimit = Math.max(1, Math.min(100, Math.trunc(limit)));
+  const counts = await Promise.all(
+    [...ALLOWED_DB_TABLES].map(async (name) => {
+      const row = await db.prepare(`SELECT COUNT(*) AS cnt FROM ${name}`).first<{ cnt: number }>();
+      return { name, count: Number(row?.cnt ?? 0) };
+    }),
+  );
+
+  const selectedTable = tableName && ALLOWED_DB_TABLES.has(tableName) ? tableName : null;
+  let rows: Array<Record<string, unknown>> = [];
+  if (selectedTable) {
+    const orderBy = selectedTable === "cache_kv" ? "updated_at DESC" : "id DESC";
+    const res = await db.prepare(`SELECT * FROM ${selectedTable} ORDER BY ${orderBy} LIMIT ?`).bind(safeLimit).all<Record<string, unknown>>();
+    rows = (res.results ?? []).map((r) => {
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(r)) {
+        if (typeof v === "string" && v.length > 240) {
+          out[k] = `${v.slice(0, 240)}… (${v.length} chars)`;
+        } else {
+          out[k] = v;
+        }
+      }
+      return out;
+    });
+  }
+
+  return { tables: counts, selectedTable, rows };
+}
+
+/** Return incident history filtered by status. */
+export async function getIncidentsList(
+  db: D1Database,
+  statusFilter: "all" | "open" | "resolved" = "all",
+  limit = 100,
+): Promise<{ incidents: IncidentRow[] }> {
+  const safeLimit = Math.max(1, Math.min(200, Math.trunc(limit)));
+  const sql =
+    statusFilter === "open"
+      ? "SELECT * FROM incidents WHERE status = 'open' ORDER BY opened_at DESC LIMIT ?"
+      : statusFilter === "resolved"
+        ? "SELECT * FROM incidents WHERE status = 'resolved' ORDER BY opened_at DESC LIMIT ?"
+        : "SELECT * FROM incidents ORDER BY CASE WHEN status = 'open' THEN 0 ELSE 1 END, opened_at DESC LIMIT ?";
+  const res = await db.prepare(sql).bind(safeLimit).all<IncidentRow>();
+  return { incidents: res.results ?? [] };
+}
+
