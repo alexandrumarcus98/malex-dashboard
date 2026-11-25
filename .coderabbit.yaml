@@ -1,0 +1,24 @@
+language: "en-US"
+
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  collapse_walkthrough: false
+  auto_review:
+    enabled: true
+    drafts: false
+  path_filters:
+    - "!pnpm-lock.yaml"
+    - "!azure-probe/package-lock.json"
+  path_instructions:
+    - path: "src/**"
+      instructions: |
+        Review Cloudflare Worker TypeScript code for Cloudflare Access JWT/Service Token separation
+        (CF_ACCESS_AUD vs CF_INGEST_ACCESS_AUD), timing-safe Bearer auth, D1 query safety, and secret hygiene.
+    - path: "public/**"
+      instructions: |
+        Ensure strict CSP compatibility (no inline scripts/styles or unsafe-eval) and safe DOM updates.
+    - path: "azure-probe/**"
+      instructions: |
+        Verify Azure Functions timer probe payload matches src/ingest.ts and no local.settings.json secrets leak.
