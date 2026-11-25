@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>Edge Ops</title>
+  <script src="/theme.js"></script>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="shell">
+    <header class="top">
+      <div class="brand">
+        <span id="overall-dot" class="dot"></span>
+        <span id="brand-name" class="brand-name">Edge Ops</span>
+        <span class="brand-sub">console</span>
+      </div>
+      <nav id="ext-links" class="ext-links" aria-label="Service bookmarks">
+        <a href="https://healthchecks.io/projects/" target="_blank" rel="noopener">Healthchecks</a>
+        <a href="https://dash.cloudflare.com" target="_blank" rel="noopener">Cloudflare</a>
+      </nav>
+      <div class="controls">
+        <div id="history-range-group" class="segmented" role="group" aria-label="History window">
+          <button class="seg-btn active" data-range="24h" aria-pressed="true">24h</button>
+          <button class="seg-btn" data-range="7d" aria-pressed="false">7d</button>
+        </div>
+        <button id="theme-btn" class="icon-btn" aria-label="Toggle theme" title="Toggle theme">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5a6.5 6.5 0 1 0 0 13z" /><circle cx="8" cy="8" r="6.5" /></svg>
+        </button>
+        <button id="run-probe-btn" class="btn">Run probe</button>
+      </div>
+    </header>
+
+    <nav class="subnav" aria-label="Dashboard pages">
+      <a href="/" data-route="/" aria-current="page">Overview</a>
+      <a href="/infra" data-route="/infra">Infra</a>
+      <a href="/backups" data-route="/backups">Backups</a>
+      <a href="/db" data-route="/db">DB</a>
+      <a href="/incidents" data-route="/incidents">Incidents</a>
+    </nav>
+
+    <section id="status-section" class="status" aria-live="polite">
+      <h1 id="status-title">Loading…</h1>
+      <p id="status-facts" class="status-facts"></p>
+      <p class="status-meta"><span id="user-email">Access verified</span> · <span id="last-updated">—</span> · refreshes every 60s</p>
+    </section>
+
+    <div id="error-banner" class="error-banner" role="alert" hidden></div>
+
+    <section id="attention" class="attention" hidden aria-label="Needs attention">
+      <ul id="attention-list"></ul>
+    </section>
+
+    <main class="grid" id="overview-view">
+      <section class="panel span-2" id="endpoints">
+        <div class="panel-head">
+          <h2>Endpoints</h2>
+          <span class="panel-note">Cloudflare cron, every 5 min</span>
+        </div>
+        <div id="endpoints-content"></div>
+      </section>
+
+      <section class="panel" id="vps">
+        <div class="panel-head">
+          <h2>Host</h2>
+          <span id="vps-note" class="panel-note"></span>
+        </div>
+        <div id="vps-content"></div>
+      </section>
+
+      <section class="panel" id="backups">
+        <div class="panel-head">
+          <h2>Backups &amp; heartbeats</h2>
+          <span id="hc-note" class="panel-note"></span>
+        </div>
+        <div id="backups-content"></div>
+      </section>
+
+      <section class="panel" id="traffic">
+        <div class="panel-head">
+          <h2>Traffic</h2>
+          <span id="cf-note" class="panel-note"></span>
+        </div>
+        <div id="traffic-content"></div>
+      </section>
+
+      <section class="panel" id="incidents">
+        <div class="panel-head">
+          <h2>Incidents</h2>
+          <span id="inc-note" class="panel-note"></span>
+        </div>
+        <div id="incidents-content"></div>
+      </section>
+    </main>
+
+    <section id="page-view" class="page-view" hidden aria-live="polite"></section>
+  </div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
