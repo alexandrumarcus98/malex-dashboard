@@ -39,3 +39,12 @@ pnpm dev                # run local Wrangler dev server
 pnpm db:migrate:remote  # apply D1 migrations to remote D1
 pnpm deploy
 ```
+
+### Local development
+
+Add these values to `.dev.vars` (gitignored and read by `wrangler dev`):
+
+- `LOCAL_DEV_BYPASS=true` — skips the Cloudflare Access check for dashboard requests on `localhost` / `127.0.0.1` only.
+- `INGEST_BEARER_TOKEN=<local-test-token>` — enables local `/api/ingest/*` requests.
+
+Keep `LOCAL_DEV_BYPASS` unset in production configuration.
