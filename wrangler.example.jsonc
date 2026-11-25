@@ -1,0 +1,41 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "edge-ops-dashboard",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-14",
+  "workers_dev": false,
+  "routes": [
+    {
+      "pattern": "ops.example.com",
+      "custom_domain": true
+    }
+  ],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ops-dashboard-db",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+  "vars": {
+    "DASHBOARD_NAME": "Edge Ops",
+    "PRIMARY_NODE_ID": "vps",
+    "CF_ZONE_ID": "",
+    "CF_ACCESS_TEAM_DOMAIN": "your-team.cloudflareaccess.com"
+    // Set sensitive/instance values via `wrangler secret put` (never commit):
+    // CF_ACCESS_AUD, CF_INGEST_ACCESS_AUD, INGEST_BEARER_TOKEN,
+    // HEALTHCHECKS_API_KEY, CF_ANALYTICS_TOKEN
+    // Optional JSON vars: PROBE_TARGETS_JSON, DASHBOARD_LINKS_JSON,
+    // HEARTBEAT_NODES_JSON, AUX_CONTAINERS_LABEL, BACKUP_LABELS_JSON
+  }
+}

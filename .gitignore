@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars*
+wrangler.jsonc
+*.pem
+*.key
+.DS_Store
+.wrangler/
+.serena/
+node_modules/
+dist/
+*.log
+*.zip
